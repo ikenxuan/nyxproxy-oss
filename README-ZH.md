@@ -557,7 +557,7 @@ docker run -d \
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `IFACE` | 默认路由网卡 | 承载 IPv6 `/64` 的网卡 |
-| `PREFIX` | 自动检测 | 手动覆盖检测结果，例如 `2001:db8:1:2::/64` |
+| `PREFIX` | 自动检测 | 固定前缀，例如 `2001:db8:1:2::/64`（会关闭自动跟随） |
 | `LISTEN_PORT` | `1080` | SOCKS5 监听端口 |
 | `POOL_SIZE` | `64` | 轮换地址数量 |
 | `MAX_USAGE` | `100` | 地址使用多少次后轮换 |
@@ -565,7 +565,7 @@ docker run -d \
 | `PROXY_USER` | `admin` | SOCKS5 用户名 |
 | `PROXY_PASS` | *(必填)* | SOCKS5 密码 |
 | `DEBUG_LEVEL` | `1` | NyxProxy 调试级别 |
-| `DNS_SOURCE_ADDRESS` | 自动 | 可选的 DNS 查询固定源地址 |
+| `DNS_SOURCE_ADDRESS` | 自动 | 固定 DNS 源地址（留空时从当前前缀自动选择） |
 | `WEB_ENABLED` | `true` | 是否启用 Web 管理面板 |
 | `WEB_LISTEN` | `0.0.0.0` | 面板监听地址（host 网络） |
 | `WEB_PORT` | `18081` | 面板端口 |
@@ -576,11 +576,14 @@ docker run -d \
 
 首次启动会用环境变量生成 `/data/config.yaml`。之后该文件是唯一权威来源：
 修改 `.env.docker` 不会改变已有配置。请用 Web 面板修改配置，或删除
-`nyxproxy-data` 卷后重新生成。`PREFIX` 和 `IFACE` 仍会通过
-`NYXPROXY_PREFIX` / `NYXPROXY_INTERFACE` 在每次启动时生效。
+`nyxproxy-data` 卷后重新生成。entrypoint 会让 `ipv6_subnet` 和
+`dns_source_address` 与检测到的前缀保持一致；需要固定时请设置 `PREFIX` 和
+`DNS_SOURCE_ADDRESS`。
 
-entrypoint 会优先从 `proto ra` 路由推导前缀；如果找不到，则回退到 `IFACE` 上
-任意 `/64` 路由（适用于 DHCPv6-PD/静态配置）。前缀变化时会重启 NyxProxy。
+entrypoint 读取 `ip -6 addr show`，选择 `IFACE` 上 remaining preferred
+lifetime 最长的非 deprecated 全局 `/64`（忽略 deprecated、temporary 和
+`/128` 池地址），因此 PPPoE 重拨后残留的旧路由不会再让地址池停在已废弃的
+前缀上。前缀变化时会改写上述两个配置字段并重启 NyxProxy。
 
 ### 发布
 

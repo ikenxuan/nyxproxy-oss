@@ -13,7 +13,7 @@
 
 services:
   nyxproxy:
-    image: ${NYXPROXY_IMAGE:-ghcr.io/ikenxuan/nyxproxy-oss:latest}
+    image: ghcr.io/ikenxuan/nyxproxy-oss:v0.0.4
     container_name: nyxproxy
     # 必须使用 host 网络：容器需要直接管理宿主机网卡上的 IPv6 地址。
     network_mode: host

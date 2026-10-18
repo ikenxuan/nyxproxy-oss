@@ -209,6 +209,7 @@ Enable IPv6 rotation using a pre-populated pool of random IPv6 addresses from `n
 - Linux only; requires root (or `CAP_NET_ADMIN`) because NyxProxy assigns/removes IPv6 addresses on the interface.
 - NyxProxy will warn if `ndppd` is not running; for most providers you must configure `ndppd` for the routed `/64`.
 - With an empty `network.ipv6_subnet`, NyxProxy detects the current `/64` at startup and follows prefix changes while running. When your ISP rotates the prefix, the pool is rebuilt automatically. If you manage `ndppd` manually, update its rule for the new prefix as well.
+- In the Docker image, the entrypoint also follows the prefix: it picks the most preferred non-deprecated global `/64` from `ip -6 addr show`, rewrites `network.ipv6_subnet` and `network.dns_source_address` in `/data/config.yaml`, and restarts NyxProxy. Set `PREFIX` or `DNS_SOURCE_ADDRESS` to pin either value.
 - If your provider delegates a `/56` or `/60`, choose one `/64` inside it and configure that; NyxProxy only assigns addresses within the configured `/64`.
 
 ### `network.ipv6_subnet`
@@ -249,7 +250,9 @@ pool and re-evaluates that choice for every DNS query. This means background IP
 rotation can no longer permanently break DNS resolution.
 
 Set it to a stable address (for example the interface's SLAAC address) if you
-want to pin DNS traffic to a specific source.
+want to pin DNS traffic to a specific source. In the Docker image the entrypoint
+rewrites this field to the current prefix's stable address whenever the prefix
+changes, unless `DNS_SOURCE_ADDRESS` is set.
 
 **Example**:
 ```yaml

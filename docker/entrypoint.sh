@@ -54,16 +54,81 @@ if [ "$WEB_ENABLED" = "true" ] && { [ -z "$WEB_USER" ] || [ -z "$WEB_PASS" ]; };
 	fatal "WEB_USER and WEB_PASS are required when WEB_ENABLED=true"
 fi
 
+# detect_prefix prints the most preferred usable global /64 on IFACE.
+# Deprecated, temporary, tentative, and non-/64 addresses are ignored; the
+# prefix with the longest remaining preferred lifetime wins. This deliberately
+# does not look at routes: after a PPPoE re-dial the old /64 route can linger
+# for hours while its address is already deprecated.
+detect_prefix() {
+	ip -6 addr show dev "$IFACE" scope global 2>/dev/null | awk '
+		function flush() {
+			if (addr == "" || deprecated || !is64) return
+			pref = (lft == "forever") ? 4294967295 : lft + 0
+			print pref, prefix
+		}
+		/^[0-9]+:/ { flush(); addr=""; deprecated=0; is64=0; lft=0; next }
+		/inet6/ {
+			flush()
+			addr=$2
+			deprecated=0; is64=0; lft=0
+			for (i=3; i<=NF; i++) if ($i == "deprecated") deprecated=1
+			if (addr ~ /\/64$/) {
+				is64=1
+				split(addr, a, ":")
+				prefix=a[1]":"a[2]":"a[3]":"a[4]"::/64"
+			}
+			next
+		}
+		/preferred_lft/ {
+			for (i=1; i<=NF; i++) {
+				if ($i == "preferred_lft") {
+					lft=$(i+1)
+					sub(/sec$/, "", lft)
+					break
+				}
+			}
+		}
+		END { flush() }
+	' | sort -k1,1nr | awk '!seen[$2]++ {print $2; exit}'
+}
+
+# stable_address prints the first non-deprecated, non-temporary global /64
+# address on IFACE that belongs to prefix $1. Pool addresses are /128 and are
+# therefore never selected.
+stable_address() {
+	prefix="$1"
+	pfx="${prefix%::/64}:"
+	ip -6 addr show dev "$IFACE" scope global 2>/dev/null | awk -v pfx="$pfx" '
+		/inet6/ {
+			addr=$2
+			skip=0
+			for (i=3; i<=NF; i++) if ($i == "deprecated" || $i == "temporary") skip=1
+			if (!skip && addr ~ /\/64$/ && index(addr, pfx) == 1) {
+				sub(/\/64$/, "", addr)
+				print addr
+				exit
+			}
+		}
+	'
+}
+
+# dns_source_for prints the address DNS queries should originate from.
+# DNS_SOURCE_ADDRESS always wins; otherwise use the stable address of the
+# current prefix so a deprecated address can never pin name resolution.
+dns_source_for() {
+	if [ -n "$DNS_SOURCE_ADDRESS" ]; then
+		printf '%s' "$DNS_SOURCE_ADDRESS"
+		return 0
+	fi
+	stable_address "$1"
+}
+
 prefix() {
 	if [ -n "$STATIC_PREFIX" ]; then
 		printf '%s' "$STATIC_PREFIX"
 		return 0
 	fi
-	p="$(ip -6 route show dev "$IFACE" proto ra 2>/dev/null | awk '$1 ~ /\/64$/ {print $1; exit}')"
-	if [ -z "$p" ]; then
-		p="$(ip -6 route show dev "$IFACE" 2>/dev/null | awk '$1 ~ /\/64$/ {print $1; exit}')"
-	fi
-	printf '%s' "$p"
+	detect_prefix
 }
 
 sed_escape() {
@@ -76,6 +141,7 @@ yaml_quote() {
 
 render_config() {
 	p="$1"
+	dns="$2"
 	mkdir -p "$(dirname "$CONFIG_PATH")"
 	chmod 700 "$(dirname "$CONFIG_PATH")"
 	umask 077
@@ -89,7 +155,7 @@ render_config() {
 		-e "s|__MAX_USAGE__|$(sed_escape "$MAX_USAGE")|g" \
 		-e "s|__MAX_AGE__|$(sed_escape "$MAX_AGE")|g" \
 		-e "s|__DEBUG_LEVEL__|$(sed_escape "$DEBUG_LEVEL")|g" \
-		-e "s|__DNS_SOURCE__|$(sed_escape "$(yaml_quote "$DNS_SOURCE_ADDRESS")")|g" \
+		-e "s|__DNS_SOURCE__|$(sed_escape "$(yaml_quote "$dns")")|g" \
 		-e "s|__WEB_ENABLED__|$(sed_escape "$WEB_ENABLED")|g" \
 		-e "s|__WEB_LISTEN__|$(sed_escape "$(yaml_quote "$WEB_LISTEN")")|g" \
 		-e "s|__WEB_PORT__|$(sed_escape "$WEB_PORT")|g" \
@@ -101,6 +167,21 @@ render_config() {
 		-e "s|__WEB_COOKIE_SECURE__|$(sed_escape "$WEB_COOKIE_SECURE")|g" \
 		"$TEMPLATE" > "$CONFIG_PATH"
 	chmod 600 "$CONFIG_PATH"
+}
+
+# update_config rewrites the prefix-managed fields of an existing config so the
+# web console and the Go process agree with the runtime values.
+update_config() {
+	cfg_prefix="$1"
+	cfg_dns="$2"
+	[ -f "$CONFIG_PATH" ] || return 0
+	tmp="${CONFIG_PATH}.tmp.$$"
+	sed \
+		-e "s|^\( *ipv6_subnet:\).*|\1 $(yaml_quote "$cfg_prefix")|" \
+		-e "s|^\( *dns_source_address:\).*|\1 $(yaml_quote "$cfg_dns")|" \
+		"$CONFIG_PATH" > "$tmp"
+	chmod 600 "$tmp"
+	mv "$tmp" "$CONFIG_PATH"
 }
 
 child=""
@@ -130,15 +211,19 @@ while :; do
 		continue
 	fi
 
+	dns="$(dns_source_for "$p")"
+
 	export NYXPROXY_PREFIX="$p"
 	export NYXPROXY_INTERFACE="$IFACE"
 
 	if [ ! -f "$CONFIG_PATH" ]; then
 		log "seeding $CONFIG_PATH from environment"
-		render_config "$p"
+		render_config "$p" "$dns"
+	else
+		update_config "$p" "$dns"
 	fi
 
-	log "starting nyxproxy with prefix $p (config: $CONFIG_PATH)"
+	log "starting nyxproxy with prefix $p (dns source: ${dns:-auto}) (config: $CONFIG_PATH)"
 	nyxproxy -config "$CONFIG_PATH" &
 	child=$!
 	current_prefix="$p"
@@ -147,8 +232,10 @@ while :; do
 		wait_sleep 10
 		kill -0 "$child" 2>/dev/null || break
 		now_prefix="$(prefix)"
-		if [ "$now_prefix" != "$current_prefix" ]; then
-			log "prefix changed from $current_prefix to ${now_prefix:-<none>}; restarting"
+		if [ -n "$now_prefix" ] && [ "$now_prefix" != "$current_prefix" ]; then
+			now_dns="$(dns_source_for "$now_prefix")"
+			log "prefix changed from $current_prefix to $now_prefix (dns source: ${now_dns:-auto}); restarting"
+			update_config "$now_prefix" "$now_dns"
 			kill -TERM "$child" 2>/dev/null || true
 			wait "$child" 2>/dev/null || true
 			child=""

@@ -551,7 +551,7 @@ docker run -d \
 | Variable | Default | Description |
 | --- | --- | --- |
 | `IFACE` | default-route interface | Interface that owns the IPv6 `/64` |
-| `PREFIX` | auto-detected | Override detection, e.g. `2001:db8:1:2::/64` |
+| `PREFIX` | auto-detected | Pin the prefix, e.g. `2001:db8:1:2::/64` (disables automatic following) |
 | `LISTEN_PORT` | `1080` | SOCKS5 listen port |
 | `POOL_SIZE` | `64` | Number of rotating addresses |
 | `MAX_USAGE` | `100` | Rotate an address after this many uses |
@@ -559,7 +559,7 @@ docker run -d \
 | `PROXY_USER` | `admin` | SOCKS5 username |
 | `PROXY_PASS` | *(required)* | SOCKS5 password |
 | `DEBUG_LEVEL` | `1` | NyxProxy debug level |
-| `DNS_SOURCE_ADDRESS` | auto | Optional pinned source address for DNS queries |
+| `DNS_SOURCE_ADDRESS` | auto | Pin the DNS source address (auto-detected from the current prefix when empty) |
 | `WEB_ENABLED` | `true` | Enable the web console |
 | `WEB_LISTEN` | `0.0.0.0` | Console listen address (host networking) |
 | `WEB_PORT` | `18081` | Console port |
@@ -571,12 +571,15 @@ docker run -d \
 The first start seeds `/data/config.yaml` from these environment variables. After
 that, the file is authoritative: changing `.env.docker` no longer changes the
 running configuration. Use the web console to edit settings, or delete the
-`nyxproxy-data` volume to seed again. `PREFIX` and `IFACE` continue to be applied
-at runtime through `NYXPROXY_PREFIX` and `NYXPROXY_INTERFACE`.
+`nyxproxy-data` volume to seed again. The entrypoint keeps `ipv6_subnet` and
+`dns_source_address` in sync with the detected prefix; use `PREFIX` and
+`DNS_SOURCE_ADDRESS` to pin either value.
 
-The entrypoint derives the prefix from `proto ra` routes first and falls back to
-any `/64` route on `IFACE` (DHCPv6-PD/static setups). It restarts NyxProxy when
-the prefix changes.
+The entrypoint reads `ip -6 addr show` and picks the most preferred
+non-deprecated global `/64` on `IFACE` (ignoring deprecated, temporary, and
+`/128` pool addresses), so a stale route left behind by a PPPoE re-dial cannot
+pin the pool to a dead prefix. When the prefix changes it rewrites those two
+config fields and restarts NyxProxy.
 
 ### Publishing
 
