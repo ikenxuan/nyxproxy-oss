@@ -14,8 +14,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web console
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Embed web console
+        run: |
+          rm -rf internal/webui/dist
+          mkdir -p internal/webui/dist
+          cp -R web/out/. internal/webui/dist/
+          touch internal/webui/dist/.gitkeep
+
+      - uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
           cache: true
@@ -24,7 +46,7 @@ jobs:
         run: go mod download
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
@@ -34,25 +56,19 @@ jobs:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
         run: |
-          # Create dist directory
           mkdir -p dist
-
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          # Build flags
           BUILD_FLAGS="-X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.Version=${VERSION#v}"
           BUILD_FLAGS="${BUILD_FLAGS} -X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.Commit=${COMMIT}"
           BUILD_FLAGS="${BUILD_FLAGS} -X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.BuildTime=${BUILD_TIME}"
 
-          # Build proxy for Linux (both amd64 and arm64)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
 
-          # Copy example config and setup script
           cp config.example.yaml dist/
           cp scripts/quick-setup.sh dist/
 
-          # Create checksums
           (cd dist && sha256sum * > sha256sums.txt)
 
       - name: Create Release

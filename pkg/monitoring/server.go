@@ -2,10 +2,13 @@ package monitoring
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
@@ -14,10 +17,12 @@ import (
 
 // Server represents the monitoring HTTP server
 type Server struct {
-	config  *config.ProxyConfig
-	metrics *metrics.Metrics
-	server  *http.Server
-	version string
+	config   *config.ProxyConfig
+	metrics  *metrics.Metrics
+	server   *http.Server
+	version  string
+	mu       sync.Mutex
+	listener net.Listener
 }
 
 // New creates a new monitoring server
@@ -29,7 +34,8 @@ func New(cfg *config.ProxyConfig, m *metrics.Metrics, version string) *Server {
 	}
 }
 
-// Start starts the monitoring server
+// Start binds the monitoring listener and returns; serving continues in the
+// background until Stop is called.
 func (s *Server) Start() error {
 	if !s.config.Monitoring.Enabled {
 		return nil
@@ -46,26 +52,59 @@ func (s *Server) Start() error {
 		listenAddr = "0.0.0.0"
 	}
 
-	addr := net.JoinHostPort(listenAddr, fmt.Sprintf("%d", s.config.Monitoring.Port))
+	addr := net.JoinHostPort(listenAddr, strconv.Itoa(s.config.Monitoring.Port))
 
-	s.server = &http.Server{
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("monitoring listen: %w", err)
+	}
+
+	srv := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 
-	log.Printf("Starting monitoring server on %s", addr)
+	s.mu.Lock()
+	s.listener = ln
+	s.server = srv
+	s.mu.Unlock()
 
-	return s.server.ListenAndServe()
+	log.Printf("Starting monitoring server on %s", ln.Addr().String())
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			log.Printf("Monitoring server error: %v", err)
+		}
+	}()
+	return nil
 }
 
-// Stop stops the monitoring server
-func (s *Server) Stop() error {
-	if s.server != nil {
-		return s.server.Close()
+// Addr returns the bound monitoring address, or an empty string when stopped.
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return ""
 	}
-	return nil
+	return s.listener.Addr().String()
+}
+
+// Stop shuts down the monitoring server. It is safe to call more than once.
+func (s *Server) Stop() error {
+	s.mu.Lock()
+	srv := s.server
+	s.server = nil
+	s.listener = nil
+	s.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	err := srv.Close()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 // handleHealth handles health check requests

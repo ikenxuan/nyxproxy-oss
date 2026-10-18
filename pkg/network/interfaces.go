@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"net"
+	"sort"
 )
 
 // InterfaceInfo contains information about a network interface
@@ -99,79 +100,189 @@ func GetInterfaceByName(name string) (*InterfaceInfo, error) {
 
 // GetOutboundIP returns the preferred outbound IP for the given interface and protocol
 func GetOutboundIP(interfaceName string, protocol int) (net.IP, error) {
-	if interfaceName == "" {
-		// Auto-detect: find first suitable interface
-		return getAutoOutboundIP(protocol)
-	}
-
-	// Get specific interface
-	iface, err := net.InterfaceByName(interfaceName)
+	addrs, err := listInterfaceAddresses(interfaceName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+		return nil, err
 	}
 
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get addresses for interface %s: %v", interfaceName, err)
-	}
-
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok {
-			continue
-		}
-
-		ip := ipNet.IP
-		isIPv6 := ip.To4() == nil
-
-		if protocol == 6 && isIPv6 {
-			// For IPv6, prefer global scope addresses
-			if !ip.IsLinkLocalUnicast() {
-				return ip, nil
-			}
-		} else if protocol == 4 && !isIPv6 {
-			return ip, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable IPv%d address found on interface %s", protocol, interfaceName)
+	return SelectDNSAddress(addrs, protocol, nil)
 }
 
-// getAutoOutboundIP automatically detects the best outbound IP
-func getAutoOutboundIP(protocol int) (net.IP, error) {
+// GetDNSOutboundIP returns an address suitable as the source of DNS queries.
+// Addresses reported by isPooled are avoided whenever a stable address exists,
+// because the rotation goroutine can delete pool addresses at any time.
+func GetDNSOutboundIP(interfaceName string, protocol int, isPooled func(net.IP) bool) (net.IP, error) {
+	addrs, err := listInterfaceAddresses(interfaceName)
+	if err != nil {
+		return nil, err
+	}
+
+	return SelectDNSAddress(addrs, protocol, isPooled)
+}
+
+// SelectDNSAddress picks the best address for DNS queries from addrs.
+//
+// Pooled addresses are skipped so that background IP rotation cannot delete the
+// address a resolver is pinned to. If every suitable address is pooled, the
+// first suitable address is returned as a fallback: callers re-select on every
+// DNS query, so a later query can recover once a stable address is available.
+func SelectDNSAddress(addrs []net.IP, protocol int, isPooled func(net.IP) bool) (net.IP, error) {
+	var fallback net.IP
+
+	for _, ip := range addrs {
+		if !isSuitableOutboundIP(ip, protocol) {
+			continue
+		}
+		if fallback == nil {
+			fallback = ip
+		}
+		if isPooled != nil && isPooled(ip) {
+			continue
+		}
+		return ip, nil
+	}
+
+	if fallback != nil {
+		return fallback, nil
+	}
+
+	return nil, fmt.Errorf("no suitable IPv%d address found", protocol)
+}
+
+func isSuitableOutboundIP(ip net.IP, protocol int) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
+		return false
+	}
+
+	isIPv6 := ip.To4() == nil
+	if protocol == 6 {
+		// Link-local addresses cannot be used as a source without a zone.
+		return isIPv6 && !ip.IsLinkLocalUnicast()
+	}
+
+	return !isIPv6
+}
+
+// listInterfaceAddresses returns all addresses of one interface, or of every
+// usable interface when interfaceName is empty.
+func listInterfaceAddresses(interfaceName string) ([]net.IP, error) {
+	if interfaceName != "" {
+		iface, err := net.InterfaceByName(interfaceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+		}
+
+		addrs, err := interfaceAddresses(*iface)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get addresses for interface %s: %v", interfaceName, err)
+		}
+		return addrs, nil
+	}
+
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list network interfaces: %v", err)
 	}
 
+	var result []net.IP
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 
+		addrs, err := interfaceAddresses(iface)
+		if err != nil {
+			continue
+		}
+		result = append(result, addrs...)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no usable network interface found")
+	}
+
+	return result, nil
+}
+
+func interfaceAddresses(iface net.Interface) ([]net.IP, error) {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		switch v := addr.(type) {
+		case *net.IPNet:
+			result = append(result, v.IP)
+		case *net.IPAddr:
+			result = append(result, v.IP)
+		}
+	}
+
+	return result, nil
+}
+
+// InterfaceDetails is the UI-facing view of an interface with IPv6 addresses
+// in CIDR form and a suggested rotation prefix.
+type InterfaceDetails struct {
+	Name            string   `json:"name"`
+	Addresses       []string `json:"addresses"`
+	SuggestedPrefix string   `json:"suggested_prefix"`
+}
+
+func ListInterfaceDetails() ([]InterfaceDetails, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list network interfaces: %v", err)
+	}
+
+	result := make([]InterfaceDetails, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
 		addrs, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
 
+		detail := InterfaceDetails{Name: iface.Name, Addresses: []string{}}
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
+			if !ok || ipNet.IP.To4() != nil || ipNet.IP.IsLinkLocalUnicast() {
 				continue
 			}
-
-			ip := ipNet.IP
-			isIPv6 := ip.To4() == nil
-
-			if protocol == 6 && isIPv6 {
-				if !ip.IsLinkLocalUnicast() {
-					return ip, nil
-				}
-			} else if protocol == 4 && !isIPv6 {
-				return ip, nil
+			detail.Addresses = append(detail.Addresses, ipNet.String())
+			if detail.SuggestedPrefix == "" {
+				detail.SuggestedPrefix = suggestedPrefix(ipNet)
 			}
+		}
+		if len(detail.Addresses) > 0 {
+			result = append(result, detail)
 		}
 	}
 
-	return nil, fmt.Errorf("no suitable IPv%d address found", protocol)
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
+func suggestedPrefix(ipNet *net.IPNet) string {
+	if ipNet == nil || ipNet.IP.To4() != nil || ipNet.IP.IsLinkLocalUnicast() {
+		return ""
+	}
+	ones, bits := ipNet.Mask.Size()
+	if ones != 64 || bits != 128 {
+		return ""
+	}
+	return ipNet.IP.Mask(ipNet.Mask).String() + "/64"
+}
+
+func detectSubnetFromDetails(interfaceName string, details []InterfaceDetails) string {
+	for _, detail := range details {
+		if detail.Name == interfaceName && detail.SuggestedPrefix != "" {
+			return detail.SuggestedPrefix
+		}
+	}
+	return ""
 }

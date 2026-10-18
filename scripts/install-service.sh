@@ -27,7 +27,7 @@ fi
 if [ ! -f "nyxproxy" ] && [ ! -f "/root/nyxproxy" ]; then
     echo -e "${RED}✗ nyxproxy binary not found${NC}"
     echo "  Please download it first:"
-    echo "  wget https://github.com/Jannik-Schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy"
+    echo "  wget https://github.com/ikenxuan/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy"
     exit 1
 fi
 
@@ -64,7 +64,7 @@ echo -e "${BLUE}[2/4] Creating systemd service file${NC}"
 cat > /etc/systemd/system/nyxproxy.service <<EOF
 [Unit]
 Description=NyxProxy IPv6 Rotating Proxy Server
-Documentation=https://github.com/Jannik-Schroeder/nyxproxy-oss
+Documentation=https://github.com/ikenxuan/nyxproxy-oss
 After=network-online.target ndppd.service
 Wants=network-online.target
 Requires=ndppd.service

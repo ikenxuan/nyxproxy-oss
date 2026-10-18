@@ -2,13 +2,24 @@ package network
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 )
+
+// Pool is the subset of IPv6Manager used by proxy implementations and status
+// reporting. It exists so tests can supply a fake without touching the host.
+type Pool interface {
+	GetRandomIPv6() (net.IP, error)
+	IsPoolAddress(net.IP) bool
+	Stop()
+	GetPoolSize() int
+	GetTotalRotated() int64
+	Prefix() string
+}
 
 // IPStats tracks usage statistics for each IP in the pool
 type IPStats struct {
@@ -28,42 +39,59 @@ type IPv6Manager struct {
 	maxUsageCount int                 // Max times an IP can be used before rotation
 	maxAge        time.Duration       // Max age of an IP before rotation
 	rotationStop  chan bool           // Channel to stop the rotation goroutine
+	stopOnce      sync.Once           // Ensures cleanup runs at most once
 	totalRotated  int64               // Total number of IPs rotated
+	runner        CommandRunner
+	poolSize      int
 }
 
 // NewIPv6Manager creates a new IPv6 manager with configurable rotation settings
 func NewIPv6Manager(interfaceName string, subnet string, poolSize, maxUsage, maxAgeMinutes int) (*IPv6Manager, error) {
+	return NewIPv6ManagerWithRunner(interfaceName, subnet, poolSize, maxUsage, maxAgeMinutes, execRunner{})
+}
+
+// NewIPv6ManagerWithRunner creates an IPv6 manager that executes system
+// commands through runner.
+func NewIPv6ManagerWithRunner(interfaceName string, subnet string, poolSize, maxUsage, maxAgeMinutes int, runner CommandRunner) (*IPv6Manager, error) {
+	if runner == nil {
+		runner = execRunner{}
+	}
+
+	if interfaceName == "" {
+		log.Printf("WARNING: no interface specified, attempting auto-detection")
+		iface, err := getDefaultInterface()
+		if err != nil {
+			return nil, fmt.Errorf("failed to auto-detect network interface: %v; set network.interface_name", err)
+		}
+		interfaceName = iface.Name
+		log.Printf("auto-detected interface: %s", interfaceName)
+	}
+
+	if subnet == "" {
+		details, err := ListInterfaceDetails()
+		if err != nil {
+			return nil, fmt.Errorf("failed to auto-detect IPv6 subnet: %v; set network.ipv6_subnet", err)
+		}
+		subnet = detectSubnetFromDetails(interfaceName, details)
+		if subnet == "" {
+			return nil, fmt.Errorf("IPv6 subnet is empty and no /64 address was found on %s; set network.ipv6_subnet", interfaceName)
+		}
+		log.Printf("auto-detected IPv6 subnet: %s", subnet)
+	}
+
 	_, ipnet, err := net.ParseCIDR(subnet)
 	if err != nil {
 		return nil, fmt.Errorf("invalid subnet: %v", err)
 	}
 
-	// Auto-detect interface if not provided
-	if interfaceName == "" {
-		fmt.Printf("⚠️  WARNING: No interface specified, attempting auto-detection...\n")
-		iface, err := getDefaultInterface()
-		if err != nil {
-			return nil, fmt.Errorf("failed to auto-detect network interface: %v\n"+
-				"Please specify interface_name in config.yaml or set NETWORK_INTERFACE environment variable", err)
-		}
-		interfaceName = iface.Name
-		fmt.Printf("✓ Auto-detected interface: %s\n", interfaceName)
-		fmt.Printf("⚠️  For production use, please set 'interface_name: \"%s\"' in config.yaml\n\n", interfaceName)
-	}
-
-	// Verify the interface exists and is up
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
-		return nil, fmt.Errorf("network interface '%s' not found: %v\n"+
-			"Run 'ip link show' to see available interfaces", interfaceName, err)
+		return nil, fmt.Errorf("network interface %q not found: %v", interfaceName, err)
 	}
-
 	if iface.Flags&net.FlagUp == 0 {
-		return nil, fmt.Errorf("network interface '%s' is down\n"+
-			"Run 'ip link set %s up' to enable it", interfaceName, interfaceName)
+		return nil, fmt.Errorf("network interface %q is down", interfaceName)
 	}
 
-	// Apply defaults if values are 0 or negative
 	if poolSize <= 0 {
 		poolSize = 200
 	}
@@ -79,33 +107,25 @@ func NewIPv6Manager(interfaceName string, subnet string, poolSize, maxUsage, max
 		subnet:        ipnet,
 		ipPool:        make([]net.IP, 0),
 		ipStats:       make(map[string]*IPStats),
-		poolIndex:     0,
 		maxUsageCount: maxUsage,
 		maxAge:        time.Duration(maxAgeMinutes) * time.Minute,
 		rotationStop:  make(chan bool),
+		runner:        runner,
+		poolSize:      poolSize,
 	}
 
-	// Check if ndppd is running (warning only, not fatal)
 	WarnIfNdppdNotRunning()
 
-	fmt.Printf("✓ IPv6 rotation mode: IP Pool with dynamic rotation\n")
-	fmt.Printf("  Interface: %s\n", interfaceName)
-	fmt.Printf("  Subnet: %s\n", ipnet.String())
-	fmt.Printf("  Pool size: %d IPs\n", poolSize)
-	fmt.Printf("  Rotation: Every %d uses or %v\n", mgr.maxUsageCount, mgr.maxAge)
-	fmt.Printf("  Initializing IP pool...\n")
+	log.Printf("IPv6 rotation mode: interface=%s subnet=%s pool=%d max_usage=%d max_age=%v",
+		interfaceName, ipnet.String(), poolSize, maxUsage, mgr.maxAge)
 
-	// Pre-populate IP pool
 	if err := mgr.populateIPPool(poolSize); err != nil {
+		mgr.Stop()
 		return nil, fmt.Errorf("failed to populate IP pool: %v", err)
 	}
 
-	fmt.Printf("✓ IP pool ready with %d addresses\n", poolSize)
-
-	// Start background rotation goroutine
+	log.Printf("IP pool ready with %d addresses", poolSize)
 	go mgr.rotateOldIPs()
-	fmt.Printf("✓ Background IP rotation started\n\n")
-
 	return mgr, nil
 }
 
@@ -143,7 +163,7 @@ func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 // populateIPPool generates and adds a pool of IPs to the interface
 // This is done once at startup, so subsequent requests are fast
 func (m *IPv6Manager) populateIPPool(size int) error {
-	fmt.Printf("  Adding %d IPv6 addresses to interface (this may take 10-30 seconds)...\n", size)
+	log.Printf("Adding %d IPv6 addresses to interface (this may take 10-30 seconds)...", size)
 
 	for i := 0; i < size; i++ {
 		ip := m.generateRandomIPv6()
@@ -168,7 +188,7 @@ func (m *IPv6Manager) populateIPPool(size int) error {
 
 		// Progress indicator every 50 IPs
 		if (i+1)%50 == 0 {
-			fmt.Printf("  Progress: %d/%d IPs added\n", i+1, size)
+			log.Printf("Progress: %d/%d IPs added", i+1, size)
 		}
 	}
 
@@ -226,7 +246,7 @@ func (m *IPv6Manager) checkAndRotateIPs() {
 			if err := m.assignIPToInterface(newIP); err != nil {
 				errStr := err.Error()
 				if !strings.Contains(errStr, "File exists") && !strings.Contains(errStr, "RTNETLINK answers") {
-					fmt.Printf("Warning: Failed to add new IP during rotation: %v\n", err)
+					log.Printf("warning: failed to add new IP during rotation: %v", err)
 					continue
 				}
 			}
@@ -246,7 +266,7 @@ func (m *IPv6Manager) checkAndRotateIPs() {
 
 	if rotatedCount > 0 {
 		m.totalRotated += int64(rotatedCount)
-		fmt.Printf("✓ Rotated %d IPs (%s)\n", rotatedCount, time.Now().Format("15:04:05"))
+		log.Printf("Rotated %d IPs (%s)", rotatedCount, time.Now().Format("15:04:05"))
 	}
 }
 
@@ -271,9 +291,7 @@ func (m *IPv6Manager) generateRandomIPv6() net.IP {
 
 // assignIPToInterface adds the IP address to the network interface
 func (m *IPv6Manager) assignIPToInterface(ip net.IP) error {
-	// ip -6 addr add <ip>/128 dev <interface>
-	cmd := exec.Command("ip", "-6", "addr", "add", fmt.Sprintf("%s/128", ip.String()), "dev", m.interfaceName)
-	output, err := cmd.CombinedOutput()
+	output, err := m.runner.Run("ip", "-6", "addr", "add", fmt.Sprintf("%s/128", ip.String()), "dev", m.interfaceName)
 	if err != nil {
 		outputStr := string(output)
 		// Check if error is because IP already exists - this is OK
@@ -291,33 +309,58 @@ func (m *IPv6Manager) assignIPToInterface(ip net.IP) error {
 
 // removeIPFromInterface removes the IP address from the network interface
 func (m *IPv6Manager) removeIPFromInterface(ip string) error {
-	// ip -6 addr del <ip>/128 dev <interface>
-	cmd := exec.Command("ip", "-6", "addr", "del", fmt.Sprintf("%s/128", ip), "dev", m.interfaceName)
-	output, err := cmd.CombinedOutput()
+	output, err := m.runner.Run("ip", "-6", "addr", "del", fmt.Sprintf("%s/128", ip), "dev", m.interfaceName)
 	if err != nil {
-		return fmt.Errorf("failed to remove IP: %v, output: %s", err, string(output))
+		return fmt.Errorf("failed to remove IP %s: %v, output: %s", ip, err, string(output))
 	}
 	return nil
 }
 
-// Stop stops the IPv6 manager and cleans up the IP pool
-func (m *IPv6Manager) Stop() {
-	// Stop rotation goroutine
-	close(m.rotationStop)
+// Prefix returns the manager's subnet in CIDR form.
+func (m *IPv6Manager) Prefix() string {
+	if m.subnet == nil {
+		return ""
+	}
+	return m.subnet.String()
+}
+
+// IsPoolAddress reports whether ip is currently part of the rotation pool.
+func (m *IPv6Manager) IsPoolAddress(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	fmt.Printf("Cleaning up IP pool (%d addresses)...\n", len(m.ipPool))
+	_, exists := m.ipStats[ip.String()]
+	return exists
+}
 
-	// Remove all IPs from the interface
-	for _, ip := range m.ipPool {
-		m.removeIPFromInterface(ip.String())
-	}
+// Stop stops the IPv6 manager and cleans up the IP pool.
+// It is safe to call Stop more than once.
+func (m *IPv6Manager) Stop() {
+	m.stopOnce.Do(func() {
+		if m.rotationStop != nil {
+			close(m.rotationStop)
+		}
 
-	m.ipPool = nil
-	m.ipStats = nil
-	fmt.Printf("✓ IP pool cleaned up\n")
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		log.Printf("Cleaning up IP pool (%d addresses)...", len(m.ipPool))
+
+		// Remove all IPs from the interface
+		for _, ip := range m.ipPool {
+			if err := m.removeIPFromInterface(ip.String()); err != nil {
+				log.Printf("warning: failed to remove IP %s during cleanup: %v", ip, err)
+			}
+		}
+
+		m.ipPool = nil
+		m.ipStats = nil
+		log.Printf("IP pool cleaned up")
+	})
 }
 
 // GetPoolSize returns the current size of the IP pool

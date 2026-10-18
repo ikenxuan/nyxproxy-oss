@@ -31,6 +31,12 @@ network:
   # Leave empty to disable rotating IPs
   ipv6_subnet: ""
 
+  # Optional: source address for DNS queries (SOCKS5 mode).
+  # Leave empty to automatically pick a stable, non-pool address; the choice is
+  # re-evaluated for every query, so IP rotation cannot break DNS resolution.
+  # Set it to a stable address (e.g. the interface's SLAAC address) to pin DNS.
+  dns_source_address: ""
+
   # Enable rotating IPv6 addresses (requires ipv6_subnet and ipv6_enabled)
   # Each connection will use a different random IPv6 from the subnet
   # The IPs are automatically assigned to the interface before use
@@ -62,3 +68,16 @@ monitoring:
 logging:
   # Debug level: 0 = none, 1 = basic, 2 = detailed
   debug_level: 1
+
+web:
+  # Disabled by default so existing deployments keep their current behavior.
+  # Set enabled: true and a non-empty password to use the web console.
+  enabled: false
+  listen_address: "127.0.0.1"
+  port: 18081
+  username: admin
+  password: change_me_too
+  tls_cert_file: ""
+  tls_key_file: ""
+  trust_proxy_headers: false
+  cookie_secure: false

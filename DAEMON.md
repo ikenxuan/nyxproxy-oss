@@ -84,7 +84,7 @@ Start NyxProxy service? (Y/n) y
 sudo tee /etc/systemd/system/nyxproxy.service <<'EOF'
 [Unit]
 Description=NyxProxy IPv6 Rotating Proxy Server
-Documentation=https://github.com/Jannik-Schroeder/nyxproxy-oss
+Documentation=https://github.com/ikenxuan/nyxproxy-oss
 After=network-online.target ndppd.service
 Wants=network-online.target
 Requires=ndppd.service
@@ -176,7 +176,7 @@ sudo systemctl status nyxproxy
 ● nyxproxy.service - NyxProxy IPv6 Rotating Proxy Server
      Loaded: loaded (/etc/systemd/system/nyxproxy.service; enabled; vendor preset: enabled)
      Active: active (running) since Sat 2025-11-02 14:00:00 UTC; 2h 15min ago
-       Docs: https://github.com/Jannik-Schroeder/nyxproxy-oss
+       Docs: https://github.com/ikenxuan/nyxproxy-oss
    Main PID: 12345 (nyxproxy)
       Tasks: 15 (limit: 4915)
      Memory: 45.2M
@@ -475,7 +475,7 @@ sudo systemctl restart nyxproxy
 ## 📞 Support
 
 For more help:
-- **GitHub Issues**: [Report issues](https://github.com/jannik-schroeder/nyxproxy-oss/issues)
+- **GitHub Issues**: [Report issues](https://github.com/ikenxuan/nyxproxy-oss/issues)
 - **Main Documentation**: See [README.md](README.md)
 - **German Documentation**: See [SETUP_DE.md](SETUP_DE.md)
 

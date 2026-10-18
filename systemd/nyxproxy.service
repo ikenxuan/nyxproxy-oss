@@ -1,6 +1,6 @@
 [Unit]
 Description=NyxProxy IPv6 Rotating Proxy Server
-Documentation=https://github.com/Jannik-Schroeder/nyxproxy-oss
+Documentation=https://github.com/ikenxuan/nyxproxy-oss
 After=network-online.target ndppd.service
 Wants=network-online.target
 Requires=ndppd.service

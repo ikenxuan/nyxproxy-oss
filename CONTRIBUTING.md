@@ -11,7 +11,7 @@ Be respectful, inclusive, and constructive in all interactions.
 ### Reporting Bugs
 
 Before creating a bug report:
-1. Check existing [issues](https://github.com/jannik-schroeder/nyxproxy-oss/issues)
+1. Check existing [issues](https://github.com/ikenxuan/nyxproxy-oss/issues)
 2. Verify you're using the latest version
 3. Collect relevant information (logs, config, system details)
 
@@ -81,26 +81,44 @@ Feature requests are welcome! Please:
 
 ### Prerequisites
 
-- Go 1.21 or later
-- Linux environment (or WSL on Windows)
+- Go 1.27 or later
+- Linux (the proxy manages Linux network interfaces)
+- Node 24 LTS and pnpm 12.14.0 for the web console
 - Git
 
 ### Build and Run
 
 ```bash
 # Clone the repository
-git clone https://github.com/jannik-schroeder/nyxproxy-oss.git
+git clone https://github.com/ikenxuan/nyxproxy-oss.git
 cd nyxproxy-oss
 
 # Install dependencies
 go mod download
 
-# Build
+# Build the embedded web console
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web build
+
+# Build the Go binary
 go build -o nyxproxy ./cmd/proxy
 
 # Run
 ./nyxproxy
 ```
+
+### Frontend Development
+
+`pnpm --dir web dev` starts the Next.js development server. It rewrites `/api`
+requests to the backend at `http://127.0.0.1:18081` (override with
+`NYXPROXY_API`), so the backend must be running first and the console must be
+enabled in its `config.yaml` (`web.enabled: true`). The default console address
+is `127.0.0.1:18081` in `config.example.yaml`.
+
+Local frontend development also requires `web.trust_proxy_headers: true` in the
+backend configuration. The Next rewrite changes the `Host` header, and the
+backend's Origin check honors `X-Forwarded-Host` only when that flag is enabled;
+without it, login and configuration changes fail with an origin mismatch.
 
 ### Project Structure
 

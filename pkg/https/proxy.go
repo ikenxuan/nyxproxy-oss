@@ -3,8 +3,10 @@ package https
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -12,15 +14,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"encoding/base64"
 
 	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/proxy"
 )
-
-var ipv6Manager *network.IPv6Manager
 
 // sensitiveHeaders contains all headers that should be removed for privacy
 var sensitiveHeaders = []string{
@@ -48,7 +50,7 @@ var sensitiveHeaders = []string{
 // debugLog prints debug messages based on debug level
 func (p *Proxy) debugLog(level int, format string, args ...interface{}) {
 	if p.config.GetDebugLevel() >= level {
-		fmt.Printf(format+"\n", args...)
+		log.Printf(format, args...)
 	}
 }
 
@@ -73,6 +75,15 @@ type Proxy struct {
 	httpServer *http.Server
 	resolver   *net.Resolver
 	localAddr  net.IP // Local address for outbound connections
+	pool       network.Pool
+
+	mu        sync.Mutex
+	listener  net.Listener
+	state     proxy.State
+	lastError string
+	startedAt time.Time
+	serveErr  error
+	done      chan struct{}
 }
 
 // NewProxy creates a new HTTPS proxy server
@@ -82,9 +93,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	protocol := cfg.GetProxyProtocol()
 
 	// Initialize IPv6 Manager if rotating IPv6 is enabled
+	var pool network.Pool
 	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
-		var err error
-		ipv6Manager, err = network.NewIPv6Manager(
+		mgr, err := network.NewIPv6Manager(
 			cfg.Network.InterfaceName,
 			cfg.Network.IPv6Subnet,
 			cfg.Network.IPv6PoolSize,
@@ -94,12 +105,16 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
 		}
-		fmt.Printf("IPv6 rotation enabled for subnet: %s\n", cfg.Network.IPv6Subnet)
+		pool = mgr
+		log.Printf("IPv6 rotation enabled for subnet: %s", cfg.Network.IPv6Subnet)
 	}
 
 	// Get local address for outbound connections
 	localAddr, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol)
 	if err != nil {
+		if pool != nil {
+			pool.Stop()
+		}
 		return nil, fmt.Errorf("failed to get outbound IP: %v", err)
 	}
 
@@ -108,6 +123,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		config:    cfg,
 		localAddr: localAddr,
 		resolver:  &net.Resolver{},
+		pool:      pool,
+		state:     proxy.StateStarting,
+		done:      make(chan struct{}),
 	}
 
 	// Configure HTTP server
@@ -480,22 +498,142 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-// Start starts the HTTPS proxy server
+// Start binds the listener and returns once the proxy is accepting
+// connections. Serving happens in the background; use Wait for its result.
 func (p *Proxy) Start() error {
-	addr := fmt.Sprintf("%s:%d", p.config.GetListenAddress(), p.config.GetListenPort())
+	addr := net.JoinHostPort(p.config.GetListenAddress(), strconv.Itoa(p.config.GetListenPort()))
 	p.debugLog(1, "Starting https proxy on %s (Protocol: IPv%d)", addr, p.config.GetProxyProtocol())
 
-	return p.httpServer.ListenAndServe()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		p.setError(err)
+		if p.pool != nil {
+			p.pool.Stop()
+		}
+		return fmt.Errorf("failed to create listener: %v", err)
+	}
+
+	p.mu.Lock()
+	p.listener = ln
+	p.httpServer.Addr = addr
+	p.state = proxy.StateRunning
+	p.startedAt = time.Now()
+	p.lastError = ""
+	done := p.done
+	p.mu.Unlock()
+
+	go func() {
+		err := p.httpServer.Serve(ln)
+		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+			err = nil
+		}
+		p.mu.Lock()
+		p.serveErr = err
+		if err != nil {
+			p.state = proxy.StateError
+			p.lastError = err.Error()
+		}
+		close(done)
+		p.mu.Unlock()
+	}()
+	return nil
 }
 
-// Stop gracefully stops the HTTPS proxy server
-func (p *Proxy) Stop() error {
-	return p.httpServer.Close()
+// Wait blocks until the serve loop exits and reports its result.
+func (p *Proxy) Wait() error {
+	p.mu.Lock()
+	done := p.done
+	p.mu.Unlock()
+	<-done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.serveErr
 }
 
-// GetIPv6Manager returns the IPv6 manager if it exists
-func GetIPv6Manager() *network.IPv6Manager {
-	return ipv6Manager
+// Stop gracefully stops the HTTPS proxy server and releases its IPv6 pool.
+func (p *Proxy) Stop(ctx context.Context) error {
+	p.mu.Lock()
+	ln := p.listener
+	if ln == nil {
+		p.mu.Unlock()
+		return nil
+	}
+	p.listener = nil
+	p.mu.Unlock()
+
+	// Close the listener eagerly: Serve may not have registered it with the
+	// http.Server yet, in which case Shutdown would not release the port
+	// before Stop returns.
+	_ = ln.Close()
+	err := p.httpServer.Shutdown(ctx)
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+		err = nil
+	}
+	_ = p.httpServer.Close()
+	if p.pool != nil {
+		p.pool.Stop()
+	}
+
+	p.mu.Lock()
+	if p.state != proxy.StateError {
+		p.state = proxy.StateStopped
+	}
+	p.mu.Unlock()
+	return err
+}
+
+// Status reports the current lifecycle state.
+func (p *Proxy) Status() proxy.ProxyStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	listen := ""
+	if p.listener != nil {
+		listen = p.listener.Addr().String()
+	} else if p.config != nil {
+		listen = net.JoinHostPort(p.config.GetListenAddress(), strconv.Itoa(p.config.GetListenPort()))
+	}
+	state := p.state
+	if state == "" {
+		state = proxy.StateStarting
+	}
+	kind := "https"
+	if p.config != nil && p.config.GetProxyType() != "" {
+		kind = p.config.GetProxyType()
+	}
+	protocol := 4
+	if p.config != nil {
+		protocol = p.config.GetProxyProtocol()
+	}
+	return proxy.ProxyStatus{
+		State:     state,
+		Type:      kind,
+		Listen:    listen,
+		Protocol:  protocol,
+		StartedAt: p.startedAt,
+		Error:     p.lastError,
+	}
+}
+
+// Addr returns the bound listen address, or an empty string when not listening.
+func (p *Proxy) Addr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listener == nil {
+		return ""
+	}
+	return p.listener.Addr().String()
+}
+
+// IPv6Manager returns the IPv6 pool backing this proxy, if any.
+func (p *Proxy) IPv6Manager() network.Pool {
+	return p.pool
+}
+
+func (p *Proxy) setError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = proxy.StateError
+	p.lastError = err.Error()
 }
 
 // getRandomIPv6 generates a random IPv6 address within the /64 subnet
@@ -515,9 +653,9 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	protocol := p.config.GetProxyProtocol()
 
-	// If IPv6 rotation is enabled and we have an IPv6 manager, use rotating IPs
-	if protocol == 6 && p.config.Network.RotateIPv6 && ipv6Manager != nil {
-		return ipv6Manager.GetRandomIPv6()
+	// If IPv6 rotation is enabled and we have an IPv6 pool, use rotating IPs
+	if protocol == 6 && p.config.Network.RotateIPv6 && p.pool != nil {
+		return p.pool.GetRandomIPv6()
 	}
 
 	// Otherwise use the static interface IP

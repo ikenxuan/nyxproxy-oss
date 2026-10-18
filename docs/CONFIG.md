@@ -6,7 +6,14 @@ This document provides detailed information about all configuration options avai
 
 NyxProxy-OSS uses YAML for configuration.
 
-NyxProxy reads `config.yaml` from the **current working directory** (CWD). In systemd, this is the unit's `WorkingDirectory=`.
+NyxProxy reads its configuration from the first path found in this order:
+
+1. `-config <path>`
+2. `NYXPROXY_CONFIG`
+3. `./config.yaml`
+
+The web console and the `Store` write back to the resolved path. Docker uses
+`/data/config.yaml`.
 
 If no `config.yaml` is present, NyxProxy falls back to legacy environment variables (see below).
 
@@ -26,6 +33,7 @@ network:
   ipv6_enabled: boolean
   rotate_ipv6: boolean
   ipv6_subnet: string
+  dns_source_address: string
   ipv6_pool_size: integer
   ipv6_max_usage: integer
   ipv6_max_age: integer
@@ -37,6 +45,17 @@ monitoring:
 
 logging:
   debug_level: integer
+
+web:
+  enabled: boolean
+  listen_address: string
+  port: integer
+  username: string
+  password: string
+  tls_cert_file: string
+  tls_key_file: string
+  trust_proxy_headers: boolean
+  cookie_secure: boolean
 ```
 
 ## Proxy Settings
@@ -212,6 +231,27 @@ network:
 
 How many IPv6 addresses NyxProxy assigns to the interface at startup.
 
+### `network.dns_source_address`
+
+- **Type**: `string`
+- **Required**: No
+- **Default**: `""` (automatic)
+
+Source address used for DNS queries in SOCKS5 mode.
+
+When empty, NyxProxy chooses a stable address that is not part of the rotation
+pool and re-evaluates that choice for every DNS query. This means background IP
+rotation can no longer permanently break DNS resolution.
+
+Set it to a stable address (for example the interface's SLAAC address) if you
+want to pin DNS traffic to a specific source.
+
+**Example**:
+```yaml
+network:
+  dns_source_address: "2a05:f480:1800:25db::1"
+```
+
 ### `network.ipv6_max_usage`
 
 - **Type**: `integer`
@@ -299,6 +339,92 @@ logging:
   debug_level: 1
 ```
 
+## Web Console Settings
+
+### `web.enabled`
+
+- **Type**: `boolean`
+- **Default**: `false`
+- **Restart required**: Yes
+
+Enables the browser console. Old configurations without a `web` section keep the
+console disabled after upgrading.
+
+### `web.listen_address`
+
+- **Type**: `string`
+- **Default**: `127.0.0.1`
+- **Restart required**: Yes
+
+IP address or `localhost`. The Docker template uses `0.0.0.0`; bare metal should
+stay on loopback and use an SSH tunnel or reverse proxy.
+
+### `web.port`
+
+- **Type**: `integer`
+- **Default**: `18081`
+- **Range**: 1-65535
+- **Restart required**: Yes
+
+Must not conflict with the proxy or monitoring listener on the same address.
+
+### `web.username`
+
+- **Type**: `string`
+- **Default**: `admin`
+- **Required when enabled**: Yes
+
+Changing this field through the console invalidates all sessions and requires a
+new login.
+
+### `web.password`
+
+- **Type**: `string`
+- **Required when enabled**: Yes
+
+Stored in plain text in the 0600 configuration file. `GET /api/config` never
+returns it. Submitting an empty password through the console keeps the current
+password.
+
+### `web.tls_cert_file` / `web.tls_key_file`
+
+- **Type**: `string`
+- **Default**: empty
+- **Restart required**: Yes
+
+Serve the console over TLS. Both must be set together and must be readable.
+Minimum TLS version is 1.2. The console uses HTTP when both are empty.
+
+### `web.trust_proxy_headers`
+
+- **Type**: `boolean`
+- **Default**: `false`
+- **Restart required**: Yes
+
+Trust `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` from a
+reverse proxy. Enable only when the console is not directly reachable. The
+reverse proxy must preserve the `Host` header or set `X-Forwarded-Host`;
+otherwise Origin checks fail.
+
+### `web.cookie_secure`
+
+- **Type**: `boolean`
+- **Default**: `false`
+- **Restart required**: Yes
+
+Force the `Secure` flag on the session cookie when TLS terminates at a reverse
+proxy and forwarded-proto headers are not used. With built-in TLS the flag is set
+automatically.
+
+## Environment overrides
+
+- `NYXPROXY_CONFIG`: configuration path when `-config` is not set.
+- `NYXPROXY_PREFIX`: overrides `network.ipv6_subnet` in memory only. The console
+  shows the field as environment-managed and rejects edits.
+- `NYXPROXY_INTERFACE`: overrides `network.interface_name` in memory only.
+
+Runtime overrides are never written back to the configuration file.
+
 ## Environment Variables (Legacy)
 
 For backward compatibility, these environment variables are supported:
@@ -363,12 +489,15 @@ logging:
 
 ## Configuration File Location
 
-NyxProxy-OSS looks for `config.yaml` in the following order:
+NyxProxy-OSS resolves the configuration path in this order:
 
-1. Current working directory
-2. Falls back to environment variables
+1. `-config <path>`
+2. `NYXPROXY_CONFIG`
+3. `./config.yaml`
 
-Custom config file paths/flags (for example `--config`) are not implemented. To run with a different config, start the process in a different working directory (or adjust your systemd `WorkingDirectory=`).
+An explicit `-config` path is independent of the working directory. When no
+configuration file is found, NyxProxy falls back to the legacy environment
+variables described above.
 
 ## Security Best Practices
 

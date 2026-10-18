@@ -55,6 +55,13 @@ func (m *Metrics) AddBytesReceived(bytes int64) {
 	m.bytesReceived += bytes
 }
 
+// SetInterface sets the interface name reported in statistics
+func (m *Metrics) SetInterface(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.interfaceName = name
+}
+
 // SetIPPoolSize sets the IP pool size
 func (m *Metrics) SetIPPoolSize(size int) {
 	m.mu.Lock()

@@ -14,16 +14,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-test:
+  web:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: web
+        run: pnpm lint
+
+      - name: Test
+        working-directory: web
+        run: pnpm test
+
+      - name: Build static export
+        working-directory: web
+        run: pnpm build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/out
+          if-no-files-found: error
+
+  go:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: internal/webui/dist
 
       - name: Go fmt (check)
         run: |
@@ -37,11 +79,26 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Go test
-        run: go test ./...
+      - name: Go test (race)
+        run: go test -race ./...
 
-      - name: Build (linux amd64/arm64)
+      - name: Build Linux binaries
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/nyxproxy-linux-amd64 ./cmd/proxy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/nyxproxy-linux-arm64 ./cmd/proxy
+
+      - name: Smoke test binary
+        run: bash scripts/smoke-test.sh dist/nyxproxy-linux-amd64
+
+      - name: Validate compose file
+        run: |
+          cp .env.docker.example .env.docker
+          docker compose config -q
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck entrypoint and build scripts
+        run: shellcheck docker/entrypoint.sh scripts/build-web.sh scripts/smoke-test.sh

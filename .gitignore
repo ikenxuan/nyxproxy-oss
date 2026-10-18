@@ -22,6 +22,7 @@ go.work
 .env
 .env.local
 .env.*.local
+.env.docker
 
 # Configuration files (user-specific)
 config.yaml
@@ -29,7 +30,7 @@ config.yml
 
 # Logs
 *.log
-logs/
+/logs/
 
 # OS files
 .DS_Store
@@ -47,5 +48,18 @@ Thumbs.db
 dist/
 build/
 
+# Keep the web UI embed placeholder tracked while generated frontend output
+# inside internal/webui/dist stays ignored.
+!internal/webui/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
 # Local caches
 .cache/
+
+# Frontend dependencies and build output
+web/node_modules/
+web/.next/
+web/out/
+web/coverage/
+web/*.tsbuildinfo

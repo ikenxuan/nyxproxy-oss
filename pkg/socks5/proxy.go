@@ -2,25 +2,35 @@ package socks5
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
+	"strconv"
+	"sync"
 	"time"
 
-	"github.com/armon/go-socks5"
+	gosocks5 "github.com/armon/go-socks5"
 	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/proxy"
 )
-
-var ipv6Manager *network.IPv6Manager
 
 // Proxy represents a SOCKS5 proxy server
 type Proxy struct {
-	config    *config.ProxyConfig
-	server    *socks5.Server
-	localAddr net.IP
-	resolver  *net.Resolver
+	config   *config.ProxyConfig
+	server   *gosocks5.Server
+	pool     network.Pool
+	resolver *net.Resolver
+
+	mu        sync.Mutex
+	listener  *trackingListener
+	state     proxy.State
+	lastError string
+	startedAt time.Time
+	serveErr  error
+	done      chan struct{}
 }
 
 // customResolver implements the socks5.NameResolver interface
@@ -107,50 +117,68 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	protocol := p.config.GetProxyProtocol()
 
-	// If IPv6 rotation is enabled and we have an IPv6 manager, use rotating IPs
-	if protocol == 6 && p.config.Network.RotateIPv6 && ipv6Manager != nil {
-		return ipv6Manager.GetRandomIPv6()
+	// If IPv6 rotation is enabled and we have an IPv6 pool, use rotating IPs
+	if protocol == 6 && p.config.Network.RotateIPv6 && p.pool != nil {
+		return p.pool.GetRandomIPv6()
 	}
 
 	// Otherwise use the static interface IP
 	return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
 }
 
+// dnsDialFunc dials a single DNS server from the given local source address.
+type dnsDialFunc func(ctx context.Context, network string, laddr *net.UDPAddr, raddr string) (net.Conn, error)
+
+// buildDNSDialer builds a Resolver.Dial function. getLocalAddr is evaluated on
+// every DNS query instead of being captured once at startup, so a rotated or
+// removed address cannot break name resolution permanently.
+func buildDNSDialer(getLocalAddr func() net.IP, protocol int, dial dnsDialFunc) func(ctx context.Context, network, address string) (net.Conn, error) {
+	dnsNetwork := "udp6"
+	dnsServers := []string{
+		"[2001:4860:4860::8888]:53", // Google
+		"[2606:4700:4700::1111]:53", // Cloudflare
+		"[2620:fe::fe]:53",          // Quad9
+	}
+	if protocol != 6 {
+		dnsNetwork = "udp4"
+		dnsServers = []string{
+			"8.8.8.8:53", // Google
+			"1.1.1.1:53", // Cloudflare
+			"9.9.9.9:53", // Quad9
+		}
+	}
+
+	return func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var laddr *net.UDPAddr
+		if getLocalAddr != nil {
+			if ip := getLocalAddr(); ip != nil {
+				laddr = &net.UDPAddr{IP: ip}
+			}
+		}
+
+		for _, dns := range dnsServers {
+			conn, err := dial(ctx, dnsNetwork, laddr, dns)
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, fmt.Errorf("all DNS servers failed")
+	}
+}
+
+func dialDNS(ctx context.Context, network string, laddr *net.UDPAddr, raddr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	if laddr != nil {
+		dialer.LocalAddr = laddr
+	}
+	return dialer.DialContext(ctx, network, raddr)
+}
+
 // createResolver creates a protocol-specific DNS resolver
-func createResolver(localAddr net.IP, protocol int) *net.Resolver {
+func createResolver(getLocalAddr func() net.IP, protocol int) *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			var dnsServers []string
-			dnsNetwork := "udp6"
-			if protocol == 6 {
-				dnsServers = []string{
-					"[2001:4860:4860::8888]:53", // Google
-					"[2606:4700:4700::1111]:53", // Cloudflare
-					"[2620:fe::fe]:53",          // Quad9
-				}
-			} else {
-				dnsNetwork = "udp4"
-				dnsServers = []string{
-					"8.8.8.8:53", // Google
-					"1.1.1.1:53", // Cloudflare
-					"9.9.9.9:53", // Quad9
-				}
-			}
-
-			dialer := &net.Dialer{
-				LocalAddr: &net.UDPAddr{IP: localAddr},
-				Timeout:   5 * time.Second,
-			}
-
-			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, dnsNetwork, dns)
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("all DNS servers failed")
-		},
+		Dial:     buildDNSDialer(getLocalAddr, protocol, dialDNS),
 	}
 }
 
@@ -161,9 +189,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	protocol := cfg.GetProxyProtocol()
 
 	// Initialize IPv6 Manager if rotating IPv6 is enabled
+	var pool network.Pool
 	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
-		var err error
-		ipv6Manager, err = network.NewIPv6Manager(
+		mgr, err := network.NewIPv6Manager(
 			cfg.Network.InterfaceName,
 			cfg.Network.IPv6Subnet,
 			cfg.Network.IPv6PoolSize,
@@ -173,29 +201,53 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
 		}
+		pool = mgr
 		log.Printf("IPv6 rotation enabled for subnet: %s", cfg.Network.IPv6Subnet)
 	}
 
-	localAddr, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
+	// DNS must not be pinned to an address that background rotation may remove.
+	dnsSource := func() net.IP {
+		if cfg.Network.DNSSourceAddress != "" {
+			return net.ParseIP(cfg.Network.DNSSourceAddress)
+		}
+
+		var isPooled func(net.IP) bool
+		if pool != nil {
+			isPooled = pool.IsPoolAddress
+		}
+
+		ip, err := network.GetDNSOutboundIP(cfg.Network.InterfaceName, protocol, isPooled)
+		if err != nil {
+			return nil
+		}
+		return ip
+	}
+
+	// Without rotation there is no pool to fall back on, so keep the early
+	// startup check for a usable outbound address.
+	if pool == nil {
+		if _, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol); err != nil {
+			return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
+		}
 	}
 
 	proxy := &Proxy{
-		config:    cfg,
-		localAddr: localAddr,
-		resolver:  createResolver(localAddr, protocol),
+		config:   cfg,
+		pool:     pool,
+		resolver: createResolver(dnsSource, protocol),
+		state:    proxy.StateStarting,
+		done:     make(chan struct{}),
 	}
 
 	// Create credentials checker
-	creds := socks5.StaticCredentials{
+	creds := gosocks5.StaticCredentials{
 		cfg.GetUsername(): cfg.GetPassword(),
 	}
 
-	auth := socks5.UserPassAuthenticator{Credentials: creds}
+	auth := gosocks5.UserPassAuthenticator{Credentials: creds}
 
-	conf := &socks5.Config{
-		AuthMethods: []socks5.Authenticator{auth},
+	conf := &gosocks5.Config{
+		AuthMethods: []gosocks5.Authenticator{auth},
 		Credentials: creds,
 		Resolver: &customResolver{
 			resolver: proxy.resolver,
@@ -251,8 +303,11 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		},
 	}
 
-	server, err := socks5.New(conf)
+	server, err := gosocks5.New(conf)
 	if err != nil {
+		if pool != nil {
+			pool.Stop()
+		}
 		return nil, fmt.Errorf("failed to create SOCKS5 server: %v", err)
 	}
 
@@ -260,25 +315,132 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	return proxy, nil
 }
 
-// Start starts the SOCKS5 proxy server
+// Start binds the listener and returns once the proxy is accepting
+// connections. Serving happens in the background; use Wait for its result.
 func (p *Proxy) Start() error {
-	addr := fmt.Sprintf("%s:%d", p.config.GetListenAddress(), p.config.GetListenPort())
+	addr := net.JoinHostPort(p.config.GetListenAddress(), strconv.Itoa(p.config.GetListenPort()))
 	p.debugLog(1, "Starting socks5 proxy on %s (Protocol: IPv%d)", addr, p.config.GetProxyProtocol())
 
-	listener, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		p.setError(err)
+		if p.pool != nil {
+			p.pool.Stop()
+		}
 		return fmt.Errorf("failed to create listener: %v", err)
 	}
 
-	return p.server.Serve(listener)
-}
+	tracked := newTrackingListener(ln)
+	p.mu.Lock()
+	p.listener = tracked
+	p.state = proxy.StateRunning
+	p.startedAt = time.Now()
+	p.lastError = ""
+	p.mu.Unlock()
 
-// Stop stops the SOCKS5 proxy server
-func (p *Proxy) Stop() error {
+	go func() {
+		err := p.server.Serve(tracked)
+		if errors.Is(err, net.ErrClosed) {
+			err = nil
+		}
+		p.mu.Lock()
+		p.serveErr = err
+		if err != nil {
+			p.state = proxy.StateError
+			p.lastError = err.Error()
+		}
+		close(p.done)
+		p.mu.Unlock()
+	}()
 	return nil
 }
 
-// GetIPv6Manager returns the IPv6 manager if it exists
-func GetIPv6Manager() *network.IPv6Manager {
-	return ipv6Manager
+// Wait blocks until the serve loop exits and reports its result.
+func (p *Proxy) Wait() error {
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.serveErr
+}
+
+// Stop closes the listener, waits for accepted connections to drain or ctx to
+// expire, and releases the IPv6 pool.
+func (p *Proxy) Stop(ctx context.Context) error {
+	p.mu.Lock()
+	ln := p.listener
+	if ln == nil {
+		p.mu.Unlock()
+		return nil
+	}
+	p.listener = nil
+	p.mu.Unlock()
+
+	_ = ln.Close()
+	ln.wait(ctx)
+
+	if p.pool != nil {
+		p.pool.Stop()
+	}
+
+	p.mu.Lock()
+	if p.state != proxy.StateError {
+		p.state = proxy.StateStopped
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+// Status reports the current lifecycle state.
+func (p *Proxy) Status() proxy.ProxyStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	started := p.startedAt
+	state := p.state
+	if state == "" {
+		state = proxy.StateStarting
+	}
+	listen := ""
+	if p.listener != nil {
+		listen = p.listener.Addr().String()
+	} else if p.config != nil {
+		listen = net.JoinHostPort(p.config.GetListenAddress(), strconv.Itoa(p.config.GetListenPort()))
+	}
+	protocol := 4
+	if p.config != nil {
+		protocol = p.config.GetProxyProtocol()
+	}
+	kind := "socks5"
+	if p.config != nil && p.config.GetProxyType() != "" {
+		kind = p.config.GetProxyType()
+	}
+	return proxy.ProxyStatus{
+		State:     state,
+		Type:      kind,
+		Listen:    listen,
+		Protocol:  protocol,
+		StartedAt: started,
+		Error:     p.lastError,
+	}
+}
+
+// Addr returns the bound listen address, or an empty string when not listening.
+func (p *Proxy) Addr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listener == nil {
+		return ""
+	}
+	return p.listener.Addr().String()
+}
+
+// IPv6Manager returns the IPv6 pool backing this proxy, if any.
+func (p *Proxy) IPv6Manager() network.Pool {
+	return p.pool
+}
+
+func (p *Proxy) setError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = proxy.StateError
+	p.lastError = err.Error()
 }

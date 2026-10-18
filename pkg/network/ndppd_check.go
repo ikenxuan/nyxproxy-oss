@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -46,6 +47,6 @@ func CheckNdppdService() error {
 // This is a non-fatal check that just warns the user
 func WarnIfNdppdNotRunning() {
 	if err := CheckNdppdService(); err != nil {
-		fmt.Printf("⚠️  WARNING: %v\n\n", err)
+		log.Printf("WARNING: %v", err)
 	}
 }
