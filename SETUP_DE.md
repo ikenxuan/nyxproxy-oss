@@ -2,21 +2,38 @@
 
 ## 🚀 Schnellstart (Debian/Ubuntu)
 
-Die einfachste Methode - **nur ein Befehl**:
+Die einfachste Methode — das Script direkt an `bash` übergeben:
 
 ```bash
-wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/scripts/quick-setup.sh && chmod +x quick-setup.sh && sudo ./quick-setup.sh
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash
 ```
+
+Das Script läuft in der aktuellen Sitzung und liest die Eingaben vom Terminal,
+im aktuellen Verzeichnis bleiben keine Dateien zurück. Die Binary wird in ein
+temporäres Verzeichnis geladen, gegen `sha256sums.txt` geprüft (falls
+verfügbar) und erst danach nach `/usr/local/bin/nyxproxy` installiert.
 
 **Das war's!** Der Script erledigt alles automatisch:
 1. Erkennt automatisch dein Netzwerk-Interface
 2. Erkennt automatisch dein IPv6 /64 Subnet
 3. Installiert und konfiguriert ndppd (NDP Proxy)
 4. Setzt Kernel-Parameter für IPv6 Routing
-5. Erstellt optimierte config.yaml mit deinen Einstellungen
+5. Erstellt `/etc/nyxproxy/config.yaml` (Modus 0600) mit deinen Einstellungen
 6. **Lädt die neueste NyxProxy Binary** von GitHub herunter
 7. **Optional: Installation als Systemd Service** (Daemon-Modus)
 8. **Optional: Startet den Proxy sofort**
+
+**Deinstallation:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash -s -- --uninstall
+```
+
+Das entfernt den Service, die Binary, die Konfiguration, die
+sysctl-Datei und die von NyxProxy erzeugte ndppd-Konfiguration und stellt
+die vorherigen Kernel- und ndppd-Einstellungen wieder her. Mit
+`--keep-config` bleibt `/etc/nyxproxy/config.yaml` erhalten, mit `--yes`
+wird die Rückfrage übersprungen.
 
 **Während des Setups wirst du gefragt:**
 - Proxy Benutzername (Standard: admin)
@@ -288,17 +305,17 @@ apt update
 apt install -y golang-go git
 
 # 3. NyxProxy klonen
-git clone https://github.com/jannik-schroeder/nyxproxy-oss.git
+git clone https://github.com/ikenxuan/nyxproxy-oss.git
 cd nyxproxy-oss
 
 # 4. Quick-Setup
 chmod +x scripts/quick-setup.sh
 
 # (benoetigt root)
-sudo ./scripts/quick-setup.sh
+sudo bash scripts/quick-setup.sh
 
-# 5. Starten
-sudo ./nyxproxy
+# 5. Starten (falls kein systemd-Service installiert wurde)
+sudo /usr/local/bin/nyxproxy -config /etc/nyxproxy/config.yaml
 ```
 
 ### Szenario 2: Bereits laufender Server mit Config

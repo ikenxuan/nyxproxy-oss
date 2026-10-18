@@ -1,11 +1,13 @@
 # NyxProxy-OSS
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://github.com/jannik-schroeder/nyxproxy-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/jannik-schroeder/nyxproxy-oss/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/jannik-schroeder/nyxproxy-oss)](https://github.com/jannik-schroeder/nyxproxy-oss/releases)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go)](https://go.dev/)
+[![CI](https://github.com/ikenxuan/nyxproxy-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/ikenxuan/nyxproxy-oss/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/ikenxuan/nyxproxy-oss)](https://github.com/ikenxuan/nyxproxy-oss/releases)
 
 **High-Performance Proxy Server with Automatic IPv6 Rotation** - Get a new IPv6 address for every request from your own /64 subnet!
+
+English | [中文](README-ZH.md)
 
 ---
 
@@ -15,10 +17,14 @@
 - [Key Features](#-key-features)
 - [How IPv6 Rotation Works](#-how-ipv6-rotation-works)
 - [Quick Start](#-quick-start)
-  - [One-Command Setup (Debian/Ubuntu)](#one-command-setup-debianubuntu)
+  - [Docker (recommended)](#docker-recommended)
+  - [Quick Setup (Debian/Ubuntu)](#quick-setup-debianubuntu)
+  - [Uninstall (Debian/Ubuntu)](#uninstall-debianubuntu)
   - [Manual Setup](#manual-setup)
 - [Configuration](#-configuration)
 - [Running as Daemon (Systemd)](#-running-as-daemon-systemd)
+- [Docker Deployment](#-docker-deployment)
+- [Web Console](#-web-console)
 - [Usage Examples](#-usage-examples)
 - [IPv6 Rotation Explained](#-ipv6-rotation-explained)
 - [Requirements](#-requirements)
@@ -81,13 +87,25 @@ NyxProxy uses your provider's **IPv6 /64 subnet** (that's 18 quintillion IPs!) t
 - **Auto-start on boot** - reliable deployment
 - **ARM64 support** - Raspberry Pi compatible
 
+### 🐳 Container Ready
+- **Multi-arch image** - published to GHCR for `linux/amd64` and `linux/arm64`
+- **Automatic prefix handling** - waits for the IPv6 `/64` and restarts on prefix changes
+- **Clean shutdown** - removes pool addresses on `SIGTERM`
+- **Compose file included** - host networking, `NET_ADMIN`, read-only root filesystem
+
+### 🖥️ Built-in Web Console
+- **Browser-based management** - dashboard, configuration editor, and live logs
+- **Transactional apply** - invalid changes are rejected; failed applies roll back to the last good config
+- **Single binary and single container** - the Next.js UI is embedded; no Node runtime in production
+- **Secure by default** - password login, CSRF protection, login rate limiting, optional TLS
+
 ---
 
 ## 🔍 How IPv6 Rotation Works
 
 ### Understanding IPv6 /64 Subnets
 
-When you rent a server from providers like **Vultr, OVH, Hetzner**, you get:
+When you rent a server with a routed IPv6 block, you typically get:
 - 1 primary IPv6 address (e.g., `2a05:f480:1800:25db::1`)
 - 1 entire **/64 subnet** (e.g., `2a05:f480:1800:25db::/64`)
 
@@ -139,22 +157,56 @@ Check each IP:
 
 ## 🚀 Quick Start
 
-### One-Command Setup (Debian/Ubuntu)
-
-The easiest way to get started - just **one command**:
+### Docker (recommended)
 
 ```bash
-wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/scripts/quick-setup.sh && chmod +x quick-setup.sh && sudo ./quick-setup.sh
+cp .env.docker.example .env.docker
+# edit .env.docker: set IFACE, PROXY_PASS, and WEB_PASS
+
+docker compose pull
+docker compose up -d
+docker compose logs -f nyxproxy
 ```
+
+Open `http://YOUR_SERVER:18081` and sign in with `WEB_USER` and `WEB_PASS`
+from `.env.docker`.
+
+The compose file pulls `ghcr.io/ikenxuan/nyxproxy-oss:latest` by default. See
+[Docker Deployment](#-docker-deployment) for details and the
+[Chinese README](README-ZH.md) for a full walkthrough.
+
+### Quick Setup (Debian/Ubuntu)
+
+The easiest way to get started — pipe the installer straight into `bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash
+```
+
+The script runs in your current session and prompts on the terminal, so nothing
+is left behind in the current directory. The release binary is downloaded into
+a temporary directory and verified against `sha256sums.txt` when that file is
+available, then installed to `/usr/local/bin/nyxproxy`.
 
 **That's it!** The script will:
 1. Auto-detect your network interface and IPv6 subnet
 2. Install and configure ndppd (NDP proxy daemon)
 3. Set kernel parameters for IPv6 routing
-4. Create optimized config.yaml with your settings
+4. Create `/etc/nyxproxy/config.yaml` (mode 0600) with your settings
 5. **Download the latest NyxProxy binary** from GitHub releases
 6. **Optionally install as systemd service** (daemon mode)
 7. **Optionally start the proxy immediately**
+
+Installed files:
+
+| Path | Purpose |
+| --- | --- |
+| `/usr/local/bin/nyxproxy` | Binary |
+| `/etc/nyxproxy/config.yaml` | Configuration |
+| `/etc/systemd/system/nyxproxy.service` | Service unit (optional) |
+| `/etc/sysctl.d/99-nyxproxy-ipv6.conf` | Kernel parameters |
+| `/etc/ndppd.conf` | ndppd configuration (previous file backed up to `/etc/ndppd.conf.nyxproxy.bak`) |
+| `/var/lib/nyxproxy/install-state` | Rollback data used by `--uninstall` |
 
 **During setup you'll be asked:**
 - Proxy username (default: admin)
@@ -162,6 +214,8 @@ wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/script
 - IP pool size (default: 200)
 - Max uses per IP (default: 100)
 - IP age limit in minutes (default: 30)
+- Enable web console? (y/N)
+- Web console username, password, and port (default: 18081)
 - Install as systemd service? (y/N)
 - Start NyxProxy now? (Y/n)
 
@@ -183,6 +237,35 @@ wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/script
 Starting https proxy on 0.0.0.0:8080 (Protocol: IPv6)
 ```
 
+### Uninstall (Debian/Ubuntu)
+
+The same script removes everything it installed. Pass `--uninstall` after
+`-s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash -s -- --uninstall
+```
+
+The uninstaller:
+
+- stops and removes the `nyxproxy` service and any running `nyxproxy` process
+- deletes `/usr/local/bin/nyxproxy`, `/etc/nyxproxy`, and `/var/lib/nyxproxy`
+- removes `/etc/sysctl.d/99-nyxproxy-ipv6.conf` and restores the kernel values
+  that were active before installation
+- restores the previous `/etc/ndppd.conf` from
+  `/etc/ndppd.conf.nyxproxy.bak`, or removes the generated one
+- removes the `ndppd` package only if the installer installed it
+
+Use `--keep-config` to keep `/etc/nyxproxy/config.yaml`, and `--yes` to skip
+the confirmation prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash -s -- --uninstall --keep-config --yes
+```
+
+If an older CWD-based installation is detected, the script prints the old
+binary and working directory instead of deleting files it does not own.
+
 ---
 
 ### Manual Setup
@@ -193,7 +276,7 @@ Starting https proxy on 0.0.0.0:8080 (Protocol: IPv6)
 #### 1. Download NyxProxy
 
 ```bash
-wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy
+wget https://github.com/ikenxuan/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy
 chmod +x nyxproxy
 ```
 
@@ -282,6 +365,21 @@ proxy:
   password: "secure-password"
 ```
 
+### Web Console
+
+```yaml
+web:
+  enabled: true
+  listen_address: "127.0.0.1"   # use 0.0.0.0 only behind a firewall/proxy
+  port: 18081
+  username: "admin"
+  password: "change_me_too"
+  tls_cert_file: ""
+  tls_key_file: ""
+  trust_proxy_headers: false
+  cookie_secure: false
+```
+
 ### IPv6 Rotation Settings
 
 ```yaml
@@ -328,6 +426,13 @@ ipv6_max_age: 120        # 2 hours
 ### Create Systemd Service
 
 ```bash
+sudo mkdir -p /etc/nyxproxy
+sudo chmod 700 /etc/nyxproxy
+sudo cp config.yaml /etc/nyxproxy/config.yaml
+sudo chmod 600 /etc/nyxproxy/config.yaml
+```
+
+```bash
 sudo tee /etc/systemd/system/nyxproxy.service <<EOF
 [Unit]
 Description=NyxProxy IPv6 Rotating Proxy Server
@@ -337,8 +442,8 @@ Requires=ndppd.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root
-ExecStart=/root/nyxproxy
+WorkingDirectory=/etc/nyxproxy
+ExecStart=/root/nyxproxy -config /etc/nyxproxy/config.yaml
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -374,6 +479,174 @@ sudo systemctl restart nyxproxy
 # Stop service
 sudo systemctl stop nyxproxy
 ```
+
+---
+
+## 🐳 Docker Deployment
+
+The repository ships a Docker image that waits for the IPv6 prefix at startup,
+follows prefix changes automatically, and cleans up its pool addresses on
+`SIGTERM`.
+
+### Requirements
+
+- A routed IPv6 `/64` with working NDP (see [Requirements](#-requirements)).
+- **Host networking** (`network_mode: host`) - bridge networking cannot add
+  addresses to the host interface.
+- `NET_ADMIN` capability.
+- The image already includes `iproute2` (the `ip` command NyxProxy uses).
+
+### Use the published image (recommended)
+
+The repository publishes multi-arch images to GitHub Container Registry:
+
+```text
+ghcr.io/ikenxuan/nyxproxy-oss:latest
+```
+
+```bash
+cp .env.docker.example .env.docker
+# edit .env.docker: set IFACE, PROXY_PASS, and WEB_PASS
+
+docker compose pull
+docker compose up -d
+docker compose logs -f nyxproxy
+```
+
+`docker-compose.yml` uses host networking, `NET_ADMIN`, a read-only root
+filesystem, and the published GHCR image by default.
+
+### Build from source
+
+```bash
+cp .env.docker.example .env.docker
+# edit .env.docker: set IFACE, PROXY_PASS, and WEB_PASS
+
+docker compose -f docker/docker-compose.example.yml up -d --build
+```
+
+Or build and run manually:
+
+```bash
+docker build -t nyxproxy-oss .
+docker run -d \
+  --name nyxproxy \
+  --network host \
+  --cap-drop ALL --cap-add NET_ADMIN \
+  --security-opt no-new-privileges:true \
+  --read-only --tmpfs /run \
+  -v nyxproxy-data:/data \
+  -e IFACE=eth0 \
+  -e LISTEN_PORT=18080 \
+  -e POOL_SIZE=64 \
+  -e PROXY_USER=admin \
+  -e PROXY_PASS=change_me \
+  -e WEB_ENABLED=true \
+  -e WEB_PASS=change_me_too \
+  nyxproxy-oss
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `IFACE` | default-route interface | Interface that owns the IPv6 `/64` |
+| `PREFIX` | auto-detected | Override detection, e.g. `2001:db8:1:2::/64` |
+| `LISTEN_PORT` | `1080` | SOCKS5 listen port |
+| `POOL_SIZE` | `64` | Number of rotating addresses |
+| `MAX_USAGE` | `100` | Rotate an address after this many uses |
+| `MAX_AGE` | `30` | Rotate an address after this many minutes |
+| `PROXY_USER` | `admin` | SOCKS5 username |
+| `PROXY_PASS` | *(required)* | SOCKS5 password |
+| `DEBUG_LEVEL` | `1` | NyxProxy debug level |
+| `DNS_SOURCE_ADDRESS` | auto | Optional pinned source address for DNS queries |
+| `WEB_ENABLED` | `true` | Enable the web console |
+| `WEB_LISTEN` | `0.0.0.0` | Console listen address (host networking) |
+| `WEB_PORT` | `18081` | Console port |
+| `WEB_USER` | `admin` | Console username |
+| `WEB_PASS` | *(required when enabled)* | Console password; only used when seeding a new volume |
+| `WEB_TLS_CERT_FILE` | empty | Container path to a TLS certificate (read-only bind mount) |
+| `WEB_TLS_KEY_FILE` | empty | Container path to the TLS private key |
+
+The first start seeds `/data/config.yaml` from these environment variables. After
+that, the file is authoritative: changing `.env.docker` no longer changes the
+running configuration. Use the web console to edit settings, or delete the
+`nyxproxy-data` volume to seed again. `PREFIX` and `IFACE` continue to be applied
+at runtime through `NYXPROXY_PREFIX` and `NYXPROXY_INTERFACE`.
+
+The entrypoint derives the prefix from `proto ra` routes first and falls back to
+any `/64` route on `IFACE` (DHCPv6-PD/static setups). It restarts NyxProxy when
+the prefix changes.
+
+### Publishing
+
+`.github/workflows/docker.yml` builds `linux/amd64` and `linux/arm64` images and
+pushes them to GHCR on pushes to `main`, on `v*` tags, and on manual
+`workflow_dispatch`. `latest` is published for both `main` and tag builds;
+version tags such as `v1.2.3` are published as well.
+
+```text
+ghcr.io/ikenxuan/nyxproxy-oss:latest
+```
+
+For a Chinese walkthrough, see [README-ZH.md](README-ZH.md).
+
+---
+
+## 🖥️ Web Console
+
+The console is served by the same binary and container as the proxy. It provides:
+
+- a live dashboard (proxy state, address pool, traffic counters, last apply result)
+- a full configuration editor with server-side validation
+- automatic apply with rollback when a component cannot start
+- a live log stream over Server-Sent Events
+
+### Docker
+
+Set `WEB_PASS` in `.env.docker`, start the stack, and open
+`http://YOUR_SERVER:18081`. With host networking the port is exposed directly on
+the host; restrict it with a firewall or a reverse proxy.
+
+For built-in TLS, mount certificates read-only and set:
+
+```yaml
+web:
+  tls_cert_file: /certs/tls.crt
+  tls_key_file: /certs/tls.key
+```
+
+```bash
+docker run ... -v "$PWD/certs:/certs:ro" ...
+```
+
+### Bare metal
+
+Enable the console in `config.yaml`:
+
+```yaml
+web:
+  enabled: true
+  listen_address: "127.0.0.1"
+  port: 18081
+  username: "admin"
+  password: "change_me_too"
+  tls_cert_file: ""
+  tls_key_file: ""
+  trust_proxy_headers: false
+  cookie_secure: false
+```
+
+The bare-metal default binds to loopback. Use an SSH tunnel
+(`ssh -L 18081:127.0.0.1:18081 user@server`) or a reverse proxy. If you put the
+console behind nginx or Caddy, preserve the `Host` header, disable proxy
+buffering for `/api/logs/stream`, and only set `trust_proxy_headers: true` when
+the console is not directly exposed.
+
+Saving a configuration restarts the proxy (and monitoring, if its settings
+changed). Existing proxy connections are drained for up to 5 seconds. Invalid
+configurations are rejected before anything is stopped. If the new configuration
+cannot start, the old one is restored and the file on disk is left unchanged.
 
 ---
 
@@ -488,16 +761,15 @@ For each IP in pool:
 - **Architecture**: amd64 or arm64
 - **RAM**: >= 512 MB
 - **Disk**: >= 100 MB
+- **Docker**: Docker Engine 20.10+ with Compose v2 (for the container deployment)
+- **Go**: 1.27+ when building from source
+- **Node**: 24 LTS and pnpm 12.14.0 when building the frontend
 
 ### Network Requirements
-- **IPv6 /64 subnet** routed to your server
-- **Supported providers**:
-  - ✅ Vultr (recommended)
-  - ✅ OVH
-  - ✅ Hetzner Dedicated Servers
-  - ✅ Online.net
-  - ❌ DigitalOcean (only /124, too small)
-  - ❌ AWS (IPv6 requires extra config)
+- **IPv6 /64 subnet** actually routed to your server
+- A provider that routes the whole `/64` to your server and lets you add addresses on the interface
+- A `/124` or smaller delegation is too small for a useful rotation pool
+- For Docker: host networking (`network_mode: host`) and `NET_ADMIN`
 
 ### Check Your Setup
 
@@ -542,8 +814,8 @@ network:
 # Install ndppd
 sudo apt install -y ndppd
 
-# Or run setup script
-sudo ./scripts/quick-setup.sh
+# Or re-run the installer
+curl -fsSL https://raw.githubusercontent.com/ikenxuan/nyxproxy-oss/main/scripts/quick-setup.sh | sudo bash
 ```
 
 ### Problem: Requests timeout
@@ -589,7 +861,8 @@ dmesg | grep -i ipv6
 
 ### Multiple Proxy Instances
 
-NyxProxy currently always reads `config.yaml` from the current working directory.
+By default NyxProxy reads `./config.yaml`. Use `-config` or `NYXPROXY_CONFIG`
+to point at a different file.
 
 Run multiple proxies on different ports by using separate directories (each with its own `config.yaml`):
 
@@ -602,9 +875,12 @@ cp nyxproxy proxy-8081/nyxproxy
 cp config.example.yaml proxy-8080/config.yaml
 cp config.example.yaml proxy-8081/config.yaml
 
-(cd proxy-8080 && sudo ./nyxproxy) &
-(cd proxy-8081 && sudo ./nyxproxy) &
+(cd proxy-8080 && sudo ./nyxproxy -config /root/proxy-8080/config.yaml) &
+(cd proxy-8081 && sudo ./nyxproxy -config /root/proxy-8081/config.yaml) &
 ```
+
+An explicit `-config` path is independent of the working directory;
+`NYXPROXY_CONFIG` provides the same override through the environment.
 
 ### Monitoring
 
@@ -650,7 +926,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/jannik-schroeder/nyxproxy-oss/issues)
+- **Issues**: [GitHub Issues](https://github.com/ikenxuan/nyxproxy-oss/issues)
 - **Documentation**: See `docs/` folder
 - **German Documentation**: See `SETUP_DE.md`
 
