@@ -1,0 +1,37 @@
+# 从源码构建的编排示例（开发或自定义镜像时使用）
+#
+# 编辑 .env.docker，设置 IFACE、PROXY_PASS 和 WEB_PASS
+# （先执行：cp .env.docker.example .env.docker）
+#
+#   docker compose -f docker/docker-compose.example.yml up -d --build
+
+services:
+  nyxproxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nyxproxy-oss:local
+    container_name: nyxproxy
+    network_mode: host
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+    env_file:
+      - ../.env.docker
+    volumes:
+      - nyxproxy-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nyxproxy-data:

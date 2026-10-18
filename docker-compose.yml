@@ -1,0 +1,41 @@
+# NyxProxy-OSS 生产环境编排文件
+#
+# 默认使用 GitHub Container Registry 上发布的镜像：
+#   ghcr.io/ikenxuan/nyxproxy-oss:latest
+#
+# 编辑 .env.docker，设置 IFACE、PROXY_PASS 和 WEB_PASS
+# （先执行：cp .env.docker.example .env.docker）
+#
+#   docker compose pull
+#   docker compose up -d
+#
+# 详细中文说明见 README-ZH.md。
+
+services:
+  nyxproxy:
+    image: ${NYXPROXY_IMAGE:-ghcr.io/ikenxuan/nyxproxy-oss:latest}
+    container_name: nyxproxy
+    # 必须使用 host 网络：容器需要直接管理宿主机网卡上的 IPv6 地址。
+    network_mode: host
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+    env_file:
+      - .env.docker
+    volumes:
+      - nyxproxy-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nyxproxy-data:

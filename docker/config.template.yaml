@@ -1,0 +1,34 @@
+proxy:
+  type: socks5
+  listen_address: 0.0.0.0
+  listen_port: __PORT__
+  username: __USER__
+  password: __PASS__
+
+network:
+  interface_name: __IFACE__
+  ipv4_enabled: false
+  ipv6_enabled: true
+  ipv6_subnet: __PREFIX__
+  rotate_ipv6: true
+  ipv6_pool_size: __POOL__
+  ipv6_max_usage: __MAX_USAGE__
+  ipv6_max_age: __MAX_AGE__
+  dns_source_address: __DNS_SOURCE__
+
+monitoring:
+  enabled: false
+
+logging:
+  debug_level: __DEBUG_LEVEL__
+
+web:
+  enabled: __WEB_ENABLED__
+  listen_address: __WEB_LISTEN__
+  port: __WEB_PORT__
+  username: __WEB_USER__
+  password: __WEB_PASS__
+  tls_cert_file: __WEB_TLS_CERT__
+  tls_key_file: __WEB_TLS_KEY__
+  trust_proxy_headers: __WEB_TRUST_PROXY__
+  cookie_secure: __WEB_COOKIE_SECURE__
