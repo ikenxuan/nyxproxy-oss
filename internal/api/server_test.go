@@ -19,6 +19,7 @@ import (
 
 type fakeController struct {
 	status      app.Status
+	poolDetails app.PoolDetails
 	cfg         config.ProxyConfig
 	gen         uint64
 	applyResult app.ApplyResult
@@ -27,6 +28,7 @@ type fakeController struct {
 }
 
 func (f *fakeController) Status() app.Status                   { return f.status }
+func (f *fakeController) PoolDetails() app.PoolDetails         { return f.poolDetails }
 func (f *fakeController) Config() (config.ProxyConfig, uint64) { return f.cfg, f.gen }
 func (f *fakeController) Apply(ctx context.Context, cfg config.ProxyConfig) (app.ApplyResult, error) {
 	return f.applyResult, f.applyErr

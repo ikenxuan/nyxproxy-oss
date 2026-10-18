@@ -17,14 +17,14 @@ export function BrandMark({
     <span
       aria-hidden="true"
       className={cn(
-        'relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-bold text-white shadow-[0_2px_10px_-2px_rgba(94,92,230,0.6)]',
+        'relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-bold text-[#04222b] shadow-[0_2px_12px_-3px_rgba(0,173,216,0.7)]',
         sizes[size],
         className,
       )}
     >
-      <span className="absolute inset-0 bg-[linear-gradient(145deg,#7b78ff_0%,#5e5ce6_48%,#3f3dbb_100%)]" />
-      <span className="absolute inset-0 bg-[radial-gradient(80%_60%_at_20%_10%,rgba(255,255,255,0.5),transparent_62%)]" />
-      <span className="absolute inset-0 rounded-[inherit] ring-1 ring-inset ring-white/25" />
+      <span className="absolute inset-0 bg-[linear-gradient(145deg,#7ad9ea_0%,#00add8_48%,#00758f_100%)]" />
+      <span className="absolute inset-0 bg-[radial-gradient(80%_60%_at_20%_10%,rgba(255,255,255,0.55),transparent_62%)]" />
+      <span className="absolute inset-0 rounded-[inherit] ring-1 ring-inset ring-white/30" />
       <span className="relative -translate-y-px tracking-tighter">N</span>
     </span>
   );
@@ -43,13 +43,10 @@ export function Brand({
     <span className={cn('flex min-w-0 items-center gap-3', className)}>
       <BrandMark size={markSize} />
       <span className="min-w-0">
-        <span
-          translate="no"
-          className="block truncate text-sm font-semibold tracking-tight text-ink"
-        >
+        <span translate="no" className="block truncate text-sm font-semibold tracking-tight text-foreground">
           NyxProxy
         </span>
-        {subtitle && <span className="block truncate text-[11px] text-faint">{subtitle}</span>}
+        {subtitle && <span className="block truncate text-[11px] text-muted">{subtitle}</span>}
       </span>
     </span>
   );

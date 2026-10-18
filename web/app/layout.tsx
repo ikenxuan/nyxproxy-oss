@@ -16,21 +16,22 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#f5f5f7' },
-    { media: '(prefers-color-scheme: dark)', color: '#0a0a0c' },
+    { media: '(prefers-color-scheme: light)', color: '#f4fafc' },
+    { media: '(prefers-color-scheme: dark)', color: '#0b1216' },
   ],
 };
 
 // Applies the saved theme before first paint so dark mode never flashes light.
-const themeScript = `(function(){try{var t=localStorage.getItem('nyxproxy-theme');var d=t==='dark'||((!t||t==='system')&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d);}catch(e){}})();`;
+// Both the class and data attribute are set because HeroUI reads either.
+const themeScript = `(function(){try{var t=localStorage.getItem('nyxproxy-theme');var d=t==='dark'||((!t||t==='system')&&window.matchMedia('(prefers-color-scheme: dark)').matches);var r=document.documentElement;r.classList.toggle('dark',d);r.dataset.theme=d?'dark':'light';}catch(e){}})();`;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" data-theme="light" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body>
+      <body className="antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>

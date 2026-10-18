@@ -18,6 +18,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, session *S
 	writeJSON(w, http.StatusOK, s.opts.Controller.Status())
 }
 
+func (s *Server) handlePool(w http.ResponseWriter, r *http.Request, session *Session) {
+	writeJSON(w, http.StatusOK, s.opts.Controller.PoolDetails())
+}
+
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request, session *Session) {
 	cfg, generation := s.opts.Controller.Config()
 	writeJSON(w, http.StatusOK, map[string]any{

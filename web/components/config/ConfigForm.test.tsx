@@ -50,8 +50,8 @@ describe('ConfigForm', () => {
       </I18nProvider>,
     );
 
-    expect(screen.getByLabelText('IPv6 /64 subnet')).toBeDisabled();
-    expect(screen.getByLabelText('Console port')).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'IPv6 /64 subnet' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Console port' })).toBeDisabled();
     expect(screen.getByText('must be between 1 and 65535')).toBeInTheDocument();
     expect(
       screen.getByText('at least one of ipv4_enabled or ipv6_enabled must be true'),

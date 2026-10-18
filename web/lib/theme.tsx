@@ -51,7 +51,9 @@ function storeTheme(theme: Theme): void {
 
 function apply(theme: Theme): void {
   const dark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  document.documentElement.classList.toggle('dark', dark);
+  const root = document.documentElement;
+  root.classList.toggle('dark', dark);
+  root.dataset.theme = dark ? 'dark' : 'light';
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

@@ -23,6 +23,7 @@ import (
 
 type Controller interface {
 	Status() app.Status
+	PoolDetails() app.PoolDetails
 	Config() (config.ProxyConfig, uint64)
 	Apply(ctx context.Context, cfg config.ProxyConfig) (app.ApplyResult, error)
 	Retry(ctx context.Context) error
@@ -94,6 +95,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", s.requireSession(s.requireCSRF(s.handleLogout)))
 
 	mux.HandleFunc("GET /api/status", s.requireSession(s.handleStatus))
+	mux.HandleFunc("GET /api/pool", s.requireSession(s.handlePool))
 	mux.HandleFunc("GET /api/config", s.requireSession(s.handleGetConfig))
 	mux.HandleFunc("PUT /api/config", s.requireSession(s.requireCSRF(s.handlePutConfig)))
 	mux.HandleFunc("POST /api/proxy/retry", s.requireSession(s.requireCSRF(s.handleRetry)))
@@ -105,6 +107,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/session", s.methodNotAllowed)
 	mux.HandleFunc("/api/auth/logout", s.methodNotAllowed)
 	mux.HandleFunc("/api/status", s.methodNotAllowed)
+	mux.HandleFunc("/api/pool", s.methodNotAllowed)
 	mux.HandleFunc("/api/config", s.methodNotAllowed)
 	mux.HandleFunc("/api/proxy/retry", s.methodNotAllowed)
 	mux.HandleFunc("/api/network/interfaces", s.methodNotAllowed)

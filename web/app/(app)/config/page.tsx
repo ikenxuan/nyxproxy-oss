@@ -1,14 +1,20 @@
 'use client';
 
-import { CheckCircle2, RefreshCw } from 'lucide-react';
+import { CheckCircle2, RefreshCw, TriangleAlert } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Alert,
+  AlertDialog,
+  Button,
+  Chip,
+  Fieldset,
+  Modal,
+  Skeleton,
+  Spinner,
+  toast,
+} from '@heroui/react';
 import { ConfigForm } from '@/components/config/ConfigForm';
-import { Banner } from '@/components/ui/Banner';
-import { Button } from '@/components/ui/Button';
-import { Dialog } from '@/components/ui/Dialog';
-import { Skeleton } from '@/components/ui/Skeleton';
-import { useToast } from '@/components/ui/Toast';
 import { api, ApiError } from '@/lib/api';
 import { hasChanges, restartSections } from '@/lib/config-diff';
 import { useDirty } from '@/lib/dirty';
@@ -24,15 +30,6 @@ function redactPasswords(cfg: Config): Config {
   };
 }
 
-function Spinner() {
-  return (
-    <span
-      aria-hidden="true"
-      className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-accent/30 border-t-accent motion-reduce:animate-none"
-    />
-  );
-}
-
 export default function ConfigPage() {
   const { t } = useI18n();
   const tRef = useRef(t);
@@ -40,7 +37,6 @@ export default function ConfigPage() {
     tRef.current = t;
   }, [t]);
   const router = useRouter();
-  const { toast } = useToast();
   const { setDirty } = useDirty();
   const redirecting = useRef(false);
   const loadSeq = useRef(0);
@@ -56,6 +52,7 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [reloadOpen, setReloadOpen] = useState(false);
   const [lastApply, setLastApply] = useState<Status['config']['last_apply'] | null>(null);
 
   const dirty = Boolean(form && original && hasChanges(original, form));
@@ -153,8 +150,7 @@ export default function ConfigPage() {
         ...meta?.passwords_set,
         'proxy.password':
           form.proxy.password !== '' || Boolean(meta?.passwords_set?.['proxy.password']),
-        'web.password':
-          form.web.password !== '' || Boolean(meta?.passwords_set?.['web.password']),
+        'web.password': form.web.password !== '' || Boolean(meta?.passwords_set?.['web.password']),
       };
       setForm(saved);
       setOriginal(saved);
@@ -164,7 +160,7 @@ export default function ConfigPage() {
           : current,
       );
       setLastApply({ ok: true, error: '', at: new Date().toISOString(), generation: result.generation });
-      toast(t('config.saved'), 'success');
+      toast.success(t('config.saved'));
       if (result.reauth_required) {
         redirecting.current = true;
         router.replace('/login');
@@ -182,7 +178,7 @@ export default function ConfigPage() {
         at: new Date().toISOString(),
         generation: meta?.generation ?? 0,
       });
-      toast(t('config.failed'), 'error');
+      toast.danger(t('config.failed'), { description: message });
     } finally {
       window.clearInterval(poll);
       if (pollRef.current === poll) pollRef.current = null;
@@ -200,19 +196,28 @@ export default function ConfigPage() {
     void apply();
   };
 
+  const requestReload = () => {
+    if (dirty) {
+      setReloadOpen(true);
+      return;
+    }
+    void load();
+  };
+
   if (!form || !meta) {
     return (
       <div className="space-y-4">
-        {error && <Banner tone="danger">{error}</Banner>}
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-64 w-full" />
+        {error && (
+          <Alert status="danger">
+            <Alert.Indicator />
+            <Alert.Content><Alert.Title>{error}</Alert.Title></Alert.Content>
+          </Alert>
+        )}
+        <Skeleton className="h-52 w-full rounded-3xl" />
+        <Skeleton className="h-72 w-full rounded-3xl" />
         <div className="flex justify-end">
-          <Button variant="secondary" onClick={() => void load()} disabled={loading}>
-            <RefreshCw
-              size={15}
-              aria-hidden="true"
-              className={loading ? 'animate-spin motion-reduce:animate-none' : undefined}
-            />
+          <Button variant="secondary" onPress={() => void load()} isDisabled={loading}>
+            {loading ? <Spinner size="sm" color="current" /> : <RefreshCw size={15} aria-hidden="true" />}
             {loading ? t('common.loading') : t('common.retry')}
           </Button>
         </div>
@@ -233,27 +238,42 @@ export default function ConfigPage() {
   return (
     <div className="space-y-4">
       <div className="space-y-3">
-        {saving && <Banner tone="info">{stepLabel}</Banner>}
-        {!saving && lastApply && (
-          <Banner tone={lastApply.ok ? 'success' : 'danger'}>
-            {lastApply.ok
-              ? t('config.last_ok', { generation: lastApply.generation })
-              : t('config.last_failed', { error: lastApply.error })}
-          </Banner>
+        {saving && (
+          <Alert status="accent">
+            <Alert.Indicator><Spinner size="sm" /></Alert.Indicator>
+            <Alert.Content><Alert.Title>{stepLabel}</Alert.Title></Alert.Content>
+          </Alert>
         )}
-        {!saving && error && <Banner tone="danger">{error}</Banner>}
+        {!saving && lastApply && (
+          <Alert status={lastApply.ok ? 'success' : 'danger'}>
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>
+                {lastApply.ok
+                  ? t('config.last_ok', { generation: lastApply.generation })
+                  : t('config.last_failed', { error: lastApply.error })}
+              </Alert.Title>
+            </Alert.Content>
+          </Alert>
+        )}
+        {!saving && error && (
+          <Alert status="danger">
+            <Alert.Indicator />
+            <Alert.Content><Alert.Title>{error}</Alert.Title></Alert.Content>
+          </Alert>
+        )}
       </div>
 
       <nav
         aria-label={t('config.section_nav')}
-        className="glass sticky top-16 z-20 -mx-4 border-b border-line px-4 py-2 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+        className="glass sticky top-16 z-20 -mx-4 border-b border-border px-4 py-2 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
       >
         <div className="flex gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {sections.map((section) => (
             <a
               key={section.id}
               href={`#${section.id}`}
-              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium text-muted transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium text-muted transition-colors hover:bg-default hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               {section.label}
             </a>
@@ -261,7 +281,7 @@ export default function ConfigPage() {
         </div>
       </nav>
 
-      <fieldset disabled={saving} className="min-w-0">
+      <Fieldset disabled={saving} className="min-w-0">
         <ConfigForm
           value={form}
           locked={meta.locked}
@@ -270,62 +290,100 @@ export default function ConfigPage() {
           passwordsSet={meta.passwords_set}
           onChange={setForm}
         />
-      </fieldset>
+      </Fieldset>
 
       <div className="sticky bottom-3 z-20">
-        <div className="glass flex flex-col gap-3 rounded-card border border-line px-3 py-3 shadow-float sm:flex-row sm:items-center sm:justify-between sm:px-4">
+        <div className="glass flex flex-col gap-3 rounded-3xl border border-border px-3 py-3 shadow-overlay sm:flex-row sm:items-center sm:justify-between sm:px-4">
           <div className="flex min-w-0 items-center gap-2 text-[13px] text-muted" aria-live="polite">
             {saving ? (
               <>
-                <Spinner />
+                <Spinner size="sm" />
                 <span className="truncate">{stepLabel}</span>
               </>
             ) : dirty ? (
-              <>
-                <span className="h-2 w-2 shrink-0 rounded-full bg-warning" aria-hidden="true" />
-                <span>{t('config.unsaved')}</span>
-              </>
+              <Chip size="sm" variant="soft" color="warning">
+                <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                <Chip.Label>{t('config.unsaved')}</Chip.Label>
+              </Chip>
             ) : (
-              <>
-                <CheckCircle2 size={15} aria-hidden="true" className="shrink-0 text-success" />
-                <span>{t('config.synced')}</span>
-              </>
+              <Chip size="sm" variant="soft" color="success">
+                <CheckCircle2 size={12} aria-hidden="true" />
+                <Chip.Label>{t('config.synced')}</Chip.Label>
+              </Chip>
             )}
           </div>
           <div className="flex items-center justify-end gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                if (dirty && !window.confirm(t('config.unsaved_confirm'))) return;
-                void load();
-              }}
-              disabled={saving || loading}
-            >
-              <RefreshCw
-                size={15}
-                aria-hidden="true"
-                className={loading ? 'animate-spin motion-reduce:animate-none' : undefined}
-              />
+            <Button variant="secondary" onPress={requestReload} isDisabled={saving || loading}>
+              {loading ? (
+                <Spinner size="sm" color="current" />
+              ) : (
+                <RefreshCw size={15} aria-hidden="true" />
+              )}
               {t('common.reload')}
             </Button>
-            <Button onClick={save} disabled={saving || !dirty}>
+            <Button onPress={save} isDisabled={saving || !dirty}>
+              {saving ? <Spinner size="sm" color="current" /> : null}
               {saving ? t('common.saving') : t('config.save')}
             </Button>
           </div>
         </div>
       </div>
 
-      <Dialog
-        open={confirmOpen}
-        title={t('config.confirm_title')}
-        confirmLabel={t('config.save')}
-        cancelLabel={t('common.cancel')}
-        onClose={() => setConfirmOpen(false)}
-        onConfirm={() => void apply()}
-        busy={saving}
-      >
-        {t('config.confirm_body')}
-      </Dialog>
+      <Modal isOpen={confirmOpen} onOpenChange={setConfirmOpen}>
+        <Modal.Backdrop>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-[440px]">
+              <Modal.CloseTrigger aria-label={t('common.close')} />
+              <Modal.Header>
+                <Modal.Icon className="bg-warning-soft text-warning-soft-foreground">
+                  <TriangleAlert size={18} aria-hidden="true" />
+                </Modal.Icon>
+                <Modal.Heading>{t('config.confirm_title')}</Modal.Heading>
+              </Modal.Header>
+              <Modal.Body>
+                <p className="text-sm leading-relaxed text-muted">{t('config.confirm_body')}</p>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button slot="close" variant="secondary">
+                  {t('common.cancel')}
+                </Button>
+                <Button onPress={() => void apply()}>{t('config.save')}</Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <AlertDialog isOpen={reloadOpen} onOpenChange={setReloadOpen}>
+        <AlertDialog.Backdrop>
+          <AlertDialog.Container>
+            <AlertDialog.Dialog className="sm:max-w-[420px]">
+              <AlertDialog.CloseTrigger aria-label={t('common.close')} />
+              <AlertDialog.Header>
+                <AlertDialog.Icon status="warning" />
+                <AlertDialog.Heading>{t('config.reload_title')}</AlertDialog.Heading>
+              </AlertDialog.Header>
+              <AlertDialog.Body>
+                <p className="text-sm leading-relaxed text-muted">{t('config.reload_body')}</p>
+              </AlertDialog.Body>
+              <AlertDialog.Footer>
+                <Button slot="close" variant="secondary">
+                  {t('common.cancel')}
+                </Button>
+                <Button
+                  variant="danger"
+                  onPress={() => {
+                    setReloadOpen(false);
+                    void load();
+                  }}
+                >
+                  {t('common.reload')}
+                </Button>
+              </AlertDialog.Footer>
+            </AlertDialog.Dialog>
+          </AlertDialog.Container>
+        </AlertDialog.Backdrop>
+      </AlertDialog>
     </div>
   );
 }

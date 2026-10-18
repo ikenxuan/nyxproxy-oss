@@ -94,6 +94,10 @@ curl -fsS -b "$WORK/cookies.txt" \
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["proxy"]["state"] == "running", d' "$WORK/status.json"
 
 curl -fsS -b "$WORK/cookies.txt" \
+  "http://127.0.0.1:$WEB_PORT/api/pool" >"$WORK/pool.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "pool" in d and "addresses" in d, d' "$WORK/pool.json"
+
+curl -fsS -b "$WORK/cookies.txt" \
   "http://127.0.0.1:$WEB_PORT/api/config" >"$WORK/config.json"
 
 python3 - "$WORK/config.json" "$WORK/update.json" <<'PY'

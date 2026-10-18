@@ -84,19 +84,47 @@ export interface ProxyStatus {
   error: string;
 }
 
+export type PoolAddressState = 'fresh' | 'active' | 'near_limit' | 'expired';
+
+export interface PoolStatus {
+  enabled: boolean;
+  size: number;
+  prefix: string;
+  rotations: number;
+  max_usage: number;
+  max_age_minutes: number;
+  used_addresses: number;
+  fresh_addresses: number;
+  total_usage: number;
+  average_usage: number;
+  utilization: number;
+  last_rotated_at?: string;
+  next_check_at?: string;
+  check_interval_seconds: number;
+}
+
+export interface PoolAddress {
+  address: string;
+  usage: number;
+  last_used: string;
+  added_at: string;
+  remaining_uses: number;
+  remaining_age_seconds: number;
+  state: PoolAddressState;
+}
+
+export interface PoolDetails {
+  pool: PoolStatus;
+  addresses: PoolAddress[];
+  generated_at: string;
+}
+
 export interface Status {
   version: string;
   uptime_seconds: number;
   proxy: ProxyStatus;
   monitoring: { enabled: boolean; state: 'stopped' | 'running' | 'error'; error: string };
-  pool: {
-    enabled: boolean;
-    size: number;
-    prefix: string;
-    rotations: number;
-    max_usage: number;
-    max_age_minutes: number;
-  };
+  pool: PoolStatus;
   metrics: {
     active_connections: number;
     total_connections: number;

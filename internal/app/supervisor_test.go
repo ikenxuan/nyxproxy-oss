@@ -107,6 +107,18 @@ func (p *fakePool) GetTotalRotated() int64 {
 	return p.rotated
 }
 
+func (p *fakePool) Snapshot() network.PoolSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return network.PoolSnapshot{
+		Size:          p.size,
+		Prefix:        "2001:db8::/64",
+		Rotations:     p.rotated,
+		MaxUsage:      10,
+		MaxAgeSeconds: 600,
+	}
+}
+
 func (p *fakePool) set(size int, rotated int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -25,7 +25,7 @@ NyxProxy-OSS 目前通过 `config.yaml` 和环境变量配置。每次修改代�
 
 - Windows 支持、Windows 构建产物和 Windows 文档
 - 细粒度热更新（只重建受影响的代理内部组件）
-- 手动地址池操作、单 IP 使用明细、连接明细
+- 手动地址池操作（增删地址）、连接明细
 - 多用户、RBAC、审计日志
 - 外部数据库；会话只存内存
 - Next.js 服务端运行时、API Routes、Server Actions
@@ -298,6 +298,7 @@ apply 失败时磁盘必须停留在最后一次可用配置；临时文件在�
 | `GET` | `/api/auth/session` | 会话 | 当前用户、CSRF token、过期时间 |
 | `POST` | `/api/auth/logout` | 会话 + CSRF | 退出 |
 | `GET` | `/api/status` | 会话 | 运行状态 |
+| `GET` | `/api/pool` | 会话 | IPv6 地址池详情与逐地址状态 |
 | `GET` | `/api/config` | 会话 | 有效配置 + 元数据 |
 | `PUT` | `/api/config` | 会话 + CSRF | 校验、保存、应用 |
 | `POST` | `/api/proxy/retry` | 会话 + CSRF | 代理 error 时重试启动 |
@@ -396,7 +397,15 @@ apply 失败时磁盘必须停留在最后一次可用配置；临时文件在�
     "prefix": "2001:db8::/64",
     "rotations": 12,
     "max_usage": 100,
-    "max_age_minutes": 30
+    "max_age_minutes": 30,
+    "used_addresses": 48,
+    "fresh_addresses": 16,
+    "total_usage": 230,
+    "average_usage": 3.59,
+    "utilization": 0.75,
+    "last_rotated_at": "2026-10-18T11:45:00Z",
+    "next_check_at": "2026-10-18T12:05:00Z",
+    "check_interval_seconds": 300
   },
   "metrics": {
     "active_connections": 3,
@@ -424,6 +433,28 @@ apply 失败时磁盘必须停留在最后一次可用配置；临时文件在�
 ```
 
 `monitoring.state` 取值为 `stopped | running | error`；启动失败只记录警告，不阻塞代理。
+
+`GET /api/pool` 返回同一份 `pool` 摘要以及逐地址明细：
+
+```json
+{
+  "pool": { "...": "与 /api/status 中的 pool 相同" },
+  "addresses": [
+    {
+      "address": "2001:db8::1a2b",
+      "usage": 12,
+      "last_used": "2026-10-18T11:58:00Z",
+      "added_at": "2026-10-18T11:30:00Z",
+      "remaining_uses": 88,
+      "remaining_age_seconds": 1200,
+      "state": "active"
+    }
+  ],
+  "generated_at": "2026-10-18T12:00:00Z"
+}
+```
+
+`addresses[].state` 取值为 `fresh | active | near_limit | expired`；`utilization` 是 `0..1` 的比例。
 
 `GET /api/network/interfaces` 返回：
 
@@ -523,11 +554,11 @@ data: {"seq":42,"ts":"2026-10-18T12:00:00Z","line":"2026/10/18 12:00:00 starting
 
 ### 9.1 技术形态
 
-- Next.js App Router + TypeScript + Tailwind CSS，版本在 `package.json` / `pnpm-lock.yaml` 锁定
+- Next.js App Router + TypeScript + Tailwind CSS v4，版本在 `package.json` / `pnpm-lock.yaml` 锁定
 - Node 24 LTS；`package.json` 中 `packageManager: "pnpm@12.9.1"`
 - 交互页面是客户端组件；`output: 'export'` 静态导出，由 Go 同源提供
 - 开发时 `next dev` 不使用 export 模式，通过 `rewrites` 把 `/api` 代理到本机 Go 进程；生产构建通过环境变量切换为 export，避免静态导出不支持 rewrites 的问题
-- 不引入 shadcn/Radix、Redux、Zustand、SWR；使用少量自建 UI 组件 + `lucide-react` 图标
+- 统一使用 HeroUI v3（`@heroui/react` + `@heroui/styles`）；不引入 shadcn/Radix、Redux、Zustand、SWR；图标使用 `lucide-react`
 
 ### 9.2 路由与布局
 
@@ -536,6 +567,7 @@ web/app/
 ├─ (auth)/login/page.tsx
 ├─ (app)/layout.tsx        # 会话检查 + 侧边栏 + 顶栏
 ├─ (app)/page.tsx          # 仪表盘
+├─ (app)/pool/page.tsx     # IPv6 地址池
 ├─ (app)/config/page.tsx
 └─ (app)/logs/page.tsx
 ```
@@ -545,13 +577,23 @@ web/app/
 ### 9.3 仪表盘
 
 - 代理卡片：状态徽章、类型、监听地址、协议、uptime；`error` 时显示错误详情和“重试启动”
-- 地址池卡片：是否启用、池大小、当前前缀、已轮换次数、max usage / max age
+- 地址池卡片：是否启用、池大小、已使用/未使用、已轮换次数、利用率、当前前缀，并可跳转地址池页
 - 流量卡片：活跃连接、累计连接、请求数、收发字节
 - 配置卡片：generation、上次应用时间、配置文件路径
 - 警告横幅：`ip` 命令缺失、上次保存失败、代理未运行
 - 5s 轮询 `/api/status`；页面隐藏时暂停，恢复可见时立即刷新
 
-### 9.4 配置页
+### 9.4 地址池页
+
+- 顶部摘要：启用状态、前缀、单地址上限、最长存活、检查间隔、上次轮换、池利用率
+- KPI：地址总数、已使用/未使用、累计轮换/累计使用、平均使用次数、下次检查
+- 状态分布：`fresh`、`active`、`near_limit`、`expired` 的数量、占比与进度条
+- 地址表格：地址、使用次数/上限、剩余次数、剩余寿命、上次使用、状态；支持列排序
+- 搜索地址、按状态筛选、每页 10/25/50/100、分页
+- 5s 自动刷新（可关闭）；页面隐藏时暂停，恢复可见时立即刷新
+- 未启用时显示说明与“前往配置”入口
+
+### 9.5 配置页
 
 - 分区：Proxy、Network、Rotation、Monitoring、Logging、Web Console、Advanced
 - 顶部状态条：未保存修改 / applying + 当前步骤 / 上次应用结果
@@ -565,14 +607,14 @@ web/app/
 - 有未保存修改时：`beforeunload` 警告 + 内部导航确认
 - 修改 Web 用户名/密码成功后，响应带 `reauth_required`，跳转登录页
 
-### 9.5 日志页
+### 9.6 日志页
 
 - SSE 日志流，暂停自动滚动、清空视图、文本过滤、连接状态
 - 页面最多保留 2000 条 DOM 节点，超出从顶部丢弃
 - 暂停时只停止自动滚动并显示“有 N 条新日志”，不停止接收
 - `onerror` 时先查 `/api/auth/session`，401 就关闭连接并跳转登录
 
-### 9.6 i18n
+### 9.7 i18n
 
 - `web/lib/i18n/zh.ts`、`en.ts`
 - `MessageKey = keyof typeof zh`，`en` 用 `Record<MessageKey, string>` 保证不漏词条
@@ -582,11 +624,12 @@ web/app/
 - 日期/数字使用 `Intl`
 - 后端错误按 `code` 映射：`t('errors.' + code)`，未知 code 显示服务端 `message`
 
-### 9.7 主题与组件
+### 9.8 主题与组件
 
-- 浅色/深色主题，默认跟随系统，可手动切换并记忆
-- `components/ui/`：Button、Input、Select、Switch、Card、Badge、Banner、Toast、Dialog、Skeleton
-- 统一 focus ring、键盘操作、`aria-live` toast、对比度达标
+- 浅色/深色主题，默认跟随系统，可手动切换并记忆；`<html>` 同时设置 `.dark` 与 `data-theme`
+- 组件全部来自 `@heroui/react`：Card、Button、TextField、NumberField、Select、Switch、Table、SearchField、Modal、AlertDialog、Drawer、Dropdown、Tooltip、Toast、Chip、ProgressBar、Skeleton 等
+- 主色取自 Go 品牌青 `#00ADD8` 衍生的 OKLCH 色阶；通过 `--accent`、`--surface`、`--muted` 等语义变量适配浅/深主题，不在组件里写死颜色
+- 统一 focus ring、键盘操作、`aria-live` toast、对比度达标；尊重 `prefers-reduced-motion` 与 `prefers-reduced-transparency`
 - 表单状态用 `useState` / `useReducer`；认证、i18n、主题用 Context
 
 ### 9.8 API 客户端
@@ -724,7 +767,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ### 11.3 集成与部署测试
 
 - Go httptest 覆盖 API + supervisor + fake proxy 的完整保存/回滚流程
-- 可选 CI smoke：ubuntu runner 上创建 dummy0，运行容器（pool=1），验证 `/healthz`、登录、`/api/status`、退出后地址被清理
+- 可选 CI smoke：ubuntu runner 上创建 dummy0，运行容器（pool=1），验证 `/healthz`、登录、`/api/status`、`/api/pool`、退出后地址被清理
 - entrypoint 运行 `shellcheck`
 - Docker 不可用的本地环境用 YAML 解析和单元测试替代；CI 负责真实镜像构建
 

@@ -67,3 +67,21 @@ export function formatTime(value: string, lang: string): string {
   }
   return formatter.format(date);
 }
+
+const compactDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+export function formatCompactDate(value: string | undefined, lang: string): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const key = locale(lang);
+  let formatter = compactDateFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(key, {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
+    compactDateFormatters.set(key, formatter);
+  }
+  return formatter.format(date);
+}

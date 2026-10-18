@@ -19,6 +19,29 @@ type Pool interface {
 	GetPoolSize() int
 	GetTotalRotated() int64
 	Prefix() string
+	Snapshot() PoolSnapshot
+}
+
+// AddressSnapshot describes one address currently assigned to the interface.
+type AddressSnapshot struct {
+	Address  string    `json:"address"`
+	Usage    int       `json:"usage"`
+	LastUsed time.Time `json:"last_used"`
+	AddedAt  time.Time `json:"added_at"`
+}
+
+// PoolSnapshot is a consistent point-in-time view of the rotation pool.
+type PoolSnapshot struct {
+	Size          int               `json:"size"`
+	Prefix        string            `json:"prefix"`
+	Rotations     int64             `json:"rotations"`
+	MaxUsage      int               `json:"max_usage"`
+	MaxAgeSeconds int64             `json:"max_age_seconds"`
+	Cursor        int               `json:"cursor"`
+	TotalUsage    int64             `json:"total_usage"`
+	LastRotatedAt *time.Time        `json:"last_rotated_at,omitempty"`
+	LastCheckedAt *time.Time        `json:"last_checked_at,omitempty"`
+	Addresses     []AddressSnapshot `json:"addresses"`
 }
 
 // IPStats tracks usage statistics for each IP in the pool
@@ -41,6 +64,9 @@ type IPv6Manager struct {
 	rotationStop  chan bool           // Channel to stop the rotation goroutine
 	stopOnce      sync.Once           // Ensures cleanup runs at most once
 	totalRotated  int64               // Total number of IPs rotated
+	totalUsage    int64               // Total number of address selections
+	lastRotatedAt time.Time           // Last time at least one address was rotated
+	lastCheckedAt time.Time           // Last time the rotation pass ran
 	runner        CommandRunner
 	poolSize      int
 }
@@ -156,6 +182,7 @@ func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 			addedAt:    time.Now(),
 		}
 	}
+	m.totalUsage++
 
 	return ip, nil
 }
@@ -266,8 +293,10 @@ func (m *IPv6Manager) checkAndRotateIPs() {
 
 	if rotatedCount > 0 {
 		m.totalRotated += int64(rotatedCount)
+		m.lastRotatedAt = now
 		log.Printf("Rotated %d IPs (%s)", rotatedCount, time.Now().Format("15:04:05"))
 	}
+	m.lastCheckedAt = now
 }
 
 // generateRandomIPv6 generates a random IPv6 address within the subnet
@@ -375,4 +404,44 @@ func (m *IPv6Manager) GetTotalRotated() int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.totalRotated
+}
+
+// Snapshot returns a consistent view of the pool for status reporting.
+func (m *IPv6Manager) Snapshot() PoolSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snap := PoolSnapshot{
+		Size:          len(m.ipPool),
+		MaxUsage:      m.maxUsageCount,
+		MaxAgeSeconds: int64(m.maxAge / time.Second),
+		Cursor:        m.poolIndex,
+		Rotations:     m.totalRotated,
+		TotalUsage:    m.totalUsage,
+		Addresses:     make([]AddressSnapshot, 0, len(m.ipPool)),
+	}
+	if m.subnet != nil {
+		snap.Prefix = m.subnet.String()
+	}
+	if !m.lastRotatedAt.IsZero() {
+		t := m.lastRotatedAt
+		snap.LastRotatedAt = &t
+	}
+	if !m.lastCheckedAt.IsZero() {
+		t := m.lastCheckedAt
+		snap.LastCheckedAt = &t
+	}
+	for _, ip := range m.ipPool {
+		stats, ok := m.ipStats[ip.String()]
+		if !ok {
+			continue
+		}
+		snap.Addresses = append(snap.Addresses, AddressSnapshot{
+			Address:  ip.String(),
+			Usage:    stats.usageCount,
+			LastUsed: stats.lastUsed,
+			AddedAt:  stats.addedAt,
+		})
+	}
+	return snap
 }

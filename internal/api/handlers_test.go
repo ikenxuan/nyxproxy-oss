@@ -181,6 +181,33 @@ func TestStatusReturnsControllerStatus(t *testing.T) {
 	}
 }
 
+func TestPoolReturnsControllerDetails(t *testing.T) {
+	srv, _ := testServer(t)
+	ctrl := srv.opts.Controller.(*fakeController)
+	ctrl.poolDetails = app.PoolDetails{
+		Pool: app.PoolStatus{Enabled: true, Size: 2, Prefix: "2001:db8::/64"},
+		Addresses: []app.PoolAddress{
+			{Address: "2001:db8::1", Usage: 3, State: "active"},
+		},
+	}
+	cookie, _ := loginCookieAndCSRF(t, srv)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/pool", nil)
+	req.Host = "example.com"
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	var details app.PoolDetails
+	if err := json.Unmarshal(rr.Body.Bytes(), &details); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if details.Pool.Size != 2 || len(details.Addresses) != 1 {
+		t.Fatalf("details = %+v", details)
+	}
+}
+
 func TestLogsStreamReplaysBufferedRecords(t *testing.T) {
 	srv, _ := testServer(t)
 	cookie, _ := loginCookieAndCSRF(t, srv)

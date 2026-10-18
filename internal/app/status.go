@@ -30,12 +30,38 @@ type MonitoringStatus struct {
 }
 
 type PoolStatus struct {
-	Enabled       bool   `json:"enabled"`
-	Size          int    `json:"size"`
-	Prefix        string `json:"prefix"`
-	Rotations     int64  `json:"rotations"`
-	MaxUsage      int    `json:"max_usage"`
-	MaxAgeMinutes int    `json:"max_age_minutes"`
+	Enabled              bool       `json:"enabled"`
+	Size                 int        `json:"size"`
+	Prefix               string     `json:"prefix"`
+	Rotations            int64      `json:"rotations"`
+	MaxUsage             int        `json:"max_usage"`
+	MaxAgeMinutes        int        `json:"max_age_minutes"`
+	UsedAddresses        int        `json:"used_addresses"`
+	FreshAddresses       int        `json:"fresh_addresses"`
+	TotalUsage           int64      `json:"total_usage"`
+	AverageUsage         float64    `json:"average_usage"`
+	Utilization          float64    `json:"utilization"`
+	LastRotatedAt        *time.Time `json:"last_rotated_at,omitempty"`
+	NextCheckAt          *time.Time `json:"next_check_at,omitempty"`
+	CheckIntervalSeconds int        `json:"check_interval_seconds"`
+}
+
+// PoolAddress is the per-address view used by the address pool page.
+type PoolAddress struct {
+	Address             string    `json:"address"`
+	Usage               int       `json:"usage"`
+	LastUsed            time.Time `json:"last_used"`
+	AddedAt             time.Time `json:"added_at"`
+	RemainingUses       int       `json:"remaining_uses"`
+	RemainingAgeSeconds int64     `json:"remaining_age_seconds"`
+	State               string    `json:"state"`
+}
+
+// PoolDetails is returned by GET /api/pool.
+type PoolDetails struct {
+	Pool        PoolStatus    `json:"pool"`
+	Addresses   []PoolAddress `json:"addresses"`
+	GeneratedAt time.Time     `json:"generated_at"`
 }
 
 type MetricsStatus struct {

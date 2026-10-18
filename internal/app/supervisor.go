@@ -19,6 +19,8 @@ import (
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/version"
 )
 
+const poolCheckInterval = 5 * time.Minute
+
 type Factory func(cfg *config.ProxyConfig) (proxy.Proxy, error)
 
 func DefaultFactory(cfg *config.ProxyConfig) (proxy.Proxy, error) {
@@ -441,6 +443,111 @@ func (s *Supervisor) Config() (config.ProxyConfig, uint64) {
 	return s.store.Snapshot()
 }
 
+// poolStatus builds the summary shown on the dashboard and pool page.
+func (s *Supervisor) poolStatus(p proxy.Proxy, cfg config.ProxyConfig) PoolStatus {
+	pool := PoolStatus{
+		Enabled:              cfg.Network.RotateIPv6,
+		Prefix:               cfg.Network.IPv6Subnet,
+		MaxUsage:             cfg.Network.IPv6MaxUsage,
+		MaxAgeMinutes:        cfg.Network.IPv6MaxAge,
+		Size:                 cfg.Network.IPv6PoolSize,
+		CheckIntervalSeconds: int(poolCheckInterval / time.Second),
+	}
+	if p == nil {
+		return pool
+	}
+	mgr := p.IPv6Manager()
+	if mgr == nil {
+		return pool
+	}
+
+	snap := mgr.Snapshot()
+	pool.Enabled = true
+	pool.Size = snap.Size
+	pool.Prefix = snap.Prefix
+	pool.Rotations = snap.Rotations
+	pool.MaxUsage = snap.MaxUsage
+	pool.MaxAgeMinutes = int(snap.MaxAgeSeconds / 60)
+	pool.TotalUsage = snap.TotalUsage
+	for _, address := range snap.Addresses {
+		if address.Usage > 0 {
+			pool.UsedAddresses++
+		}
+	}
+	pool.FreshAddresses = snap.Size - pool.UsedAddresses
+	if snap.Size > 0 {
+		pool.AverageUsage = float64(snap.TotalUsage) / float64(snap.Size)
+	}
+	if snap.Size > 0 && snap.MaxUsage > 0 {
+		pool.Utilization = float64(snap.TotalUsage) / float64(snap.Size*snap.MaxUsage)
+	}
+	pool.LastRotatedAt = snap.LastRotatedAt
+	if snap.LastCheckedAt != nil {
+		next := snap.LastCheckedAt.Add(poolCheckInterval)
+		pool.NextCheckAt = &next
+	}
+	return pool
+}
+
+// PoolDetails returns the full address list for the pool page.
+func (s *Supervisor) PoolDetails() PoolDetails {
+	s.mu.Lock()
+	p := s.current
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	now := time.Now()
+	details := PoolDetails{
+		Pool:        s.poolStatus(p, cfg),
+		Addresses:   []PoolAddress{},
+		GeneratedAt: now,
+	}
+	if p == nil {
+		return details
+	}
+	mgr := p.IPv6Manager()
+	if mgr == nil {
+		return details
+	}
+
+	snap := mgr.Snapshot()
+	maxAge := time.Duration(snap.MaxAgeSeconds) * time.Second
+	for _, address := range snap.Addresses {
+		remainingUses := snap.MaxUsage - address.Usage
+		if remainingUses < 0 {
+			remainingUses = 0
+		}
+		age := now.Sub(address.AddedAt)
+		remainingAge := int64((maxAge - age) / time.Second)
+		if remainingAge < 0 {
+			remainingAge = 0
+		}
+		details.Addresses = append(details.Addresses, PoolAddress{
+			Address:             address.Address,
+			Usage:               address.Usage,
+			LastUsed:            address.LastUsed,
+			AddedAt:             address.AddedAt,
+			RemainingUses:       remainingUses,
+			RemainingAgeSeconds: remainingAge,
+			State:               poolAddressState(address.Usage, snap.MaxUsage, age, maxAge),
+		})
+	}
+	return details
+}
+
+func poolAddressState(usage, maxUsage int, age, maxAge time.Duration) string {
+	if (maxUsage > 0 && usage >= maxUsage) || (maxAge > 0 && age >= maxAge) {
+		return "expired"
+	}
+	if (maxUsage > 0 && usage*5 >= maxUsage*4) || (maxAge > 0 && age*5 >= maxAge*4) {
+		return "near_limit"
+	}
+	if usage > 0 {
+		return "active"
+	}
+	return "fresh"
+}
+
 func (s *Supervisor) Status() Status {
 	s.mu.Lock()
 	cfg := s.cfg
@@ -475,21 +582,7 @@ func (s *Supervisor) Status() Status {
 		ps.State = string(proxy.StateStopped)
 	}
 
-	pool := PoolStatus{
-		Enabled:       cfg.Network.RotateIPv6,
-		Prefix:        cfg.Network.IPv6Subnet,
-		MaxUsage:      cfg.Network.IPv6MaxUsage,
-		MaxAgeMinutes: cfg.Network.IPv6MaxAge,
-		Size:          cfg.Network.IPv6PoolSize,
-	}
-	if p != nil {
-		if mgr := p.IPv6Manager(); mgr != nil {
-			pool.Enabled = true
-			pool.Size = mgr.GetPoolSize()
-			pool.Prefix = mgr.Prefix()
-			pool.Rotations = mgr.GetTotalRotated()
-		}
-	}
+	pool := s.poolStatus(p, cfg)
 
 	stats := s.metrics.GetStats()
 	now := time.Now()
