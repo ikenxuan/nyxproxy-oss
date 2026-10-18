@@ -14,6 +14,7 @@ import (
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/https"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/metrics"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/monitoring"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/proxy"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/socks5"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/version"
@@ -63,6 +64,17 @@ type Supervisor struct {
 	poolMetricsInterval time.Duration
 	poolStop            chan struct{}
 	poolDone            chan struct{}
+
+	// Prefix watcher: in auto mode (rotate_ipv6 with an empty ipv6_subnet) the
+	// current /64 is detected at startup and followed when the ISP rotates it.
+	prefixInterval time.Duration
+	prefixDebounce time.Duration
+	prefixStop     chan struct{}
+	prefixDone     chan struct{}
+	pendingPrefix  string
+	pendingSince   time.Time
+	prefixSeen     map[string]time.Time
+	detectPrefix   func(interfaceName string) ([]string, error)
 }
 
 func New(cfg config.ProxyConfig, store *config.Store, factory Factory, m *metrics.Metrics, buildVersion string) *Supervisor {
@@ -81,6 +93,9 @@ func New(cfg config.ProxyConfig, store *config.Store, factory Factory, m *metric
 		proxyState:          string(proxy.StateStopped),
 		monitoringState:     "stopped",
 		poolMetricsInterval: 10 * time.Second,
+		prefixInterval:      15 * time.Second,
+		prefixDebounce:      15 * time.Second,
+		detectPrefix:        network.DetectRotationPrefixes,
 	}
 }
 
@@ -100,6 +115,10 @@ func (s *Supervisor) Start() error {
 	cfg := s.cfg
 	s.proxyState = string(proxy.StateStarting)
 	s.mu.Unlock()
+
+	// Watch for ISP prefix changes even if the proxy fails to start: the
+	// watcher retries once a usable /64 appears (common on PPPoE links).
+	s.startPrefixWatcher()
 
 	if cfg.Monitoring.Enabled {
 		if err := s.startMonitoring(&cfg); err != nil {
@@ -390,9 +409,10 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 	s.shuttingDown = true
 	s.mu.Unlock()
 
-	// Stop the supervisor-owned ticker before tearing components down so no
-	// refresh can observe a half-stopped proxy.
+	// Stop the supervisor-owned tickers before tearing components down so no
+	// refresh or prefix rebuild can observe a half-stopped proxy.
 	s.stopPoolMetricsTicker()
+	s.stopPrefixWatcher()
 
 	// Let an in-flight apply observe the shutdown flag before stopping
 	// components it may still be using. The wait is bounded by ctx.
@@ -741,6 +761,220 @@ func (s *Supervisor) stopPoolMetricsTicker() {
 	if done != nil {
 		<-done
 	}
+}
+
+// startPrefixWatcher starts the periodic ISP prefix check. It is a no-op when
+// the watcher already runs or Shutdown has begun.
+func (s *Supervisor) startPrefixWatcher() {
+	s.mu.Lock()
+	if s.shuttingDown || s.prefixStop != nil {
+		s.mu.Unlock()
+		return
+	}
+	interval := s.prefixInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.prefixStop = stop
+	s.prefixDone = done
+	s.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.checkPrefix()
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+// stopPrefixWatcher stops the periodic prefix check and waits for its
+// goroutine to exit. Safe to call multiple times.
+func (s *Supervisor) stopPrefixWatcher() {
+	s.mu.Lock()
+	stop := s.prefixStop
+	done := s.prefixDone
+	s.prefixStop = nil
+	s.prefixDone = nil
+	s.mu.Unlock()
+	if stop == nil {
+		return
+	}
+	close(stop)
+	if done != nil {
+		<-done
+	}
+}
+
+// checkPrefix rebuilds the proxy when the interface moves to a different /64.
+// It only acts in auto mode: rotate_ipv6 enabled with an empty ipv6_subnet.
+func (s *Supervisor) checkPrefix() {
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return
+	}
+	cfg := s.cfg
+	p := s.current
+	detect := s.detectPrefix
+	s.mu.Unlock()
+
+	if detect == nil || !cfg.Network.RotateIPv6 || cfg.Network.IPv6Subnet != "" {
+		s.resetPrefixTracking()
+		return
+	}
+
+	prefixes, err := detect(cfg.Network.InterfaceName)
+	if err != nil || len(prefixes) == 0 {
+		// A missing address during PPPoE renegotiation is transient; keep the
+		// current pool and the prefix history intact.
+		s.clearPendingPrefix()
+		return
+	}
+
+	current := ""
+	if p != nil {
+		if mgr := p.IPv6Manager(); mgr != nil {
+			current = mgr.Prefix()
+		}
+	}
+
+	now := time.Now()
+	target, debounce := s.selectPrefixTarget(prefixes, current, now)
+	if target == "" || target == current {
+		s.clearPendingPrefix()
+		return
+	}
+
+	// Require the target to stay stable for the debounce window so a
+	// transition with both old and new addresses does not restart the proxy
+	// repeatedly.
+	s.mu.Lock()
+	if s.pendingPrefix != target {
+		s.pendingPrefix = target
+		s.pendingSince = now
+		s.mu.Unlock()
+		return
+	}
+	if now.Sub(s.pendingSince) < debounce {
+		s.mu.Unlock()
+		return
+	}
+	s.pendingPrefix = ""
+	s.pendingSince = time.Time{}
+	s.mu.Unlock()
+
+	if !s.applyMu.TryLock() {
+		return
+	}
+	defer s.applyMu.Unlock()
+	if s.isShuttingDown() {
+		return
+	}
+
+	// Re-read the config: an Apply may have changed it while we waited.
+	s.mu.Lock()
+	cfg = s.cfg
+	s.mu.Unlock()
+	if !cfg.Network.RotateIPv6 || cfg.Network.IPv6Subnet != "" {
+		return
+	}
+
+	if current == "" {
+		log.Printf("IPv6 prefix %s available; starting proxy", target)
+	} else {
+		log.Printf("IPv6 prefix changed from %s to %s; rebuilding rotation pool", current, target)
+	}
+	s.setApply(true, "updating_prefix")
+	defer s.setApply(false, "")
+
+	// Pin the detected prefix for this restart so the factory does not race a
+	// second detection. s.cfg stays in auto mode for the next change.
+	runtimeCfg := cfg
+	runtimeCfg.Network.IPv6Subnet = target
+	if err := s.restartProxy(context.Background(), &runtimeCfg); err != nil {
+		log.Printf("failed to rebuild proxy for prefix %s: %v", target, err)
+	}
+}
+
+// selectPrefixTarget picks the prefix the pool should use. The current prefix
+// is kept while it is still present; a switch only happens when the current
+// prefix disappears or a prefix that appeared after it shows up. Tracking the
+// first-seen time keeps interfaces with several valid /64s from flapping.
+func (s *Supervisor) selectPrefixTarget(prefixes []string, current string, now time.Time) (string, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.prefixSeen == nil {
+		s.prefixSeen = make(map[string]time.Time, len(prefixes))
+	}
+	present := make(map[string]bool, len(prefixes))
+	for _, prefix := range prefixes {
+		present[prefix] = true
+		if _, ok := s.prefixSeen[prefix]; !ok {
+			s.prefixSeen[prefix] = now
+		}
+	}
+	for prefix := range s.prefixSeen {
+		if !present[prefix] {
+			delete(s.prefixSeen, prefix)
+		}
+	}
+
+	debounce := s.prefixDebounce
+	if debounce <= 0 {
+		debounce = 15 * time.Second
+	}
+
+	if current == "" {
+		return prefixes[0], debounce
+	}
+
+	currentSeen, currentPresent := s.prefixSeen[current]
+	if !currentPresent {
+		// The pool's prefix is gone; move to the best remaining prefix.
+		return prefixes[0], debounce
+	}
+
+	newest := ""
+	for _, prefix := range prefixes {
+		if prefix == current {
+			continue
+		}
+		seen := s.prefixSeen[prefix]
+		if !seen.After(currentSeen) {
+			continue
+		}
+		if newest == "" || seen.After(s.prefixSeen[newest]) {
+			newest = prefix
+		}
+	}
+	return newest, debounce
+}
+
+func (s *Supervisor) clearPendingPrefix() {
+	s.mu.Lock()
+	s.pendingPrefix = ""
+	s.pendingSince = time.Time{}
+	s.mu.Unlock()
+}
+
+// resetPrefixTracking forgets observed prefixes when auto mode is not active,
+// so re-enabling it starts from a clean history.
+func (s *Supervisor) resetPrefixTracking() {
+	s.mu.Lock()
+	s.pendingPrefix = ""
+	s.pendingSince = time.Time{}
+	s.prefixSeen = nil
+	s.mu.Unlock()
 }
 
 func (s *Supervisor) startMonitoring(cfg *config.ProxyConfig) error {

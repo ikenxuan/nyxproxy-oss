@@ -80,6 +80,7 @@ export interface ProxyStatus {
   type: string;
   listen: string;
   protocol: number;
+  url: string;
   started_at?: string;
   error: string;
 }

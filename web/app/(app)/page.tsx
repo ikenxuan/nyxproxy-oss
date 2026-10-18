@@ -29,6 +29,7 @@ import {
   toast,
 } from '@heroui/react';
 import { api } from '@/lib/api';
+import { copyText } from '@/lib/clipboard';
 import { formatBytes, formatDate, formatDuration, formatNumber } from '@/lib/format';
 import { errorMessage, useI18n } from '@/lib/i18n';
 import type { PoolStatus, Status } from '@/lib/types';
@@ -87,7 +88,7 @@ export default function DashboardPage() {
 
   const copyAddress = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
       toast.success(t('common.copied'));
     } catch {
       toast.danger(t('common.copy_failed'));
@@ -113,6 +114,7 @@ export default function DashboardPage() {
   }
 
   const proxy = status.proxy;
+  const proxyURL = proxy.url || proxy.listen;
   const stateLabel = t(`dashboard.state.${proxy.state}` as 'dashboard.state.running');
   const monitoringLabel = status.monitoring.enabled
     ? t(`dashboard.state.${status.monitoring.state}` as 'dashboard.state.running')
@@ -183,16 +185,16 @@ export default function DashboardPage() {
               </p>
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 <span className="break-all rounded-xl border border-border bg-surface-secondary/60 px-3 py-1.5 font-mono text-[13px] leading-relaxed text-foreground">
-                  {proxy.listen || '—'}
+                  {proxyURL || '—'}
                 </span>
-                {proxy.listen && (
+                {proxyURL && (
                   <Tooltip>
                     <Button
                       variant="ghost"
                       size="sm"
                       isIconOnly
                       aria-label={t('dashboard.copy_address')}
-                      onPress={() => void copyAddress(proxy.listen)}
+                      onPress={() => void copyAddress(proxyURL)}
                     >
                       <Copy size={15} aria-hidden="true" />
                     </Button>

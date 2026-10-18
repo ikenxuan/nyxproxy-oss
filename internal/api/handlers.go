@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jannik-schroeder/nyxproxy-oss/internal/app"
@@ -15,7 +18,44 @@ import (
 )
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, session *Session) {
-	writeJSON(w, http.StatusOK, s.opts.Controller.Status())
+	status := s.opts.Controller.Status()
+	cfg, _ := s.opts.Controller.Config()
+	status.Proxy.URL = buildProxyURL(status.Proxy, cfg.Proxy.Username, cfg.Proxy.Password, requestHost(r))
+	writeJSON(w, http.StatusOK, status)
+}
+
+// requestHost returns the host the console was reached through. It is used as
+// the client-facing host when the proxy listens on a wildcard address.
+func requestHost(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.Host); err == nil {
+		return host
+	}
+	return strings.Trim(r.Host, "[]")
+}
+
+// buildProxyURL turns the listener address into a ready-to-use proxy URL.
+// Wildcard listeners are replaced with fallbackHost; credentials are escaped.
+func buildProxyURL(status app.ProxyStatus, username, password, fallbackHost string) string {
+	host, port, err := net.SplitHostPort(status.Listen)
+	if err != nil {
+		return ""
+	}
+	if host == "" || host == "::" || host == "0.0.0.0" {
+		host = fallbackHost
+	}
+	if host == "" {
+		host = "localhost"
+	}
+
+	scheme := "http"
+	if status.Type == "socks5" {
+		scheme = "socks5"
+	}
+	auth := ""
+	if username != "" {
+		auth = url.UserPassword(username, password).String() + "@"
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, auth, net.JoinHostPort(host, port))
 }
 
 func (s *Server) handlePool(w http.ResponseWriter, r *http.Request, session *Session) {

@@ -28,7 +28,8 @@ network:
 
   # IPv6 subnet for rotating IPs (e.g., "2a05:f480:1800:25db::/64")
   # Only works on providers that support /64 routing (Vultr, OVH, Hetzner Dedicated, etc.)
-  # Leave empty to disable rotating IPs
+  # Leave empty to auto-detect the current /64 and follow ISP prefix changes.
+  # Set a value to pin a fixed prefix.
   ipv6_subnet: ""
 
   # Optional: source address for DNS queries (SOCKS5 mode).
@@ -37,7 +38,7 @@ network:
   # Set it to a stable address (e.g. the interface's SLAAC address) to pin DNS.
   dns_source_address: ""
 
-  # Enable rotating IPv6 addresses (requires ipv6_subnet and ipv6_enabled)
+  # Enable rotating IPv6 addresses (requires ipv6_enabled)
   # Each connection will use a different random IPv6 from the subnet
   # The IPs are automatically assigned to the interface before use
   rotate_ipv6: false

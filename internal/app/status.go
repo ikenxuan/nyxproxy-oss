@@ -19,6 +19,7 @@ type ProxyStatus struct {
 	Type      string     `json:"type"`
 	Listen    string     `json:"listen"`
 	Protocol  int        `json:"protocol"`
+	URL       string     `json:"url"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	Error     string     `json:"error"`
 }

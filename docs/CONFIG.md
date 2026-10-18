@@ -208,19 +208,24 @@ Enable IPv6 rotation using a pre-populated pool of random IPv6 addresses from `n
 **Notes**:
 - Linux only; requires root (or `CAP_NET_ADMIN`) because NyxProxy assigns/removes IPv6 addresses on the interface.
 - NyxProxy will warn if `ndppd` is not running; for most providers you must configure `ndppd` for the routed `/64`.
+- With an empty `network.ipv6_subnet`, NyxProxy detects the current `/64` at startup and follows prefix changes while running. When your ISP rotates the prefix, the pool is rebuilt automatically. If you manage `ndppd` manually, update its rule for the new prefix as well.
+- If your provider delegates a `/56` or `/60`, choose one `/64` inside it and configure that; NyxProxy only assigns addresses within the configured `/64`.
 
 ### `network.ipv6_subnet`
 
 - **Type**: `string`
-- **Required**: Yes (if `network.rotate_ipv6` is `true`)
+- **Required**: No. Leave empty to auto-detect and follow the current `/64`.
 
-IPv6 subnet (typically a routed `/64`) used to generate random outgoing IPv6 addresses.
+IPv6 subnet (typically a routed `/64`) used to generate random outgoing IPv6 addresses. A non-empty value pins the prefix and disables automatic following.
 
 **Example**:
 ```yaml
 network:
   rotate_ipv6: true
-  ipv6_subnet: "2a05:f480:1800:25db::/64"
+  # Empty: auto-detect the current /64 and follow ISP prefix changes.
+  ipv6_subnet: ""
+  # Fixed alternative:
+  # ipv6_subnet: "2a05:f480:1800:25db::/64"
 ```
 
 ### `network.ipv6_pool_size`

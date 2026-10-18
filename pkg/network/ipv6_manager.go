@@ -94,14 +94,11 @@ func NewIPv6ManagerWithRunner(interfaceName string, subnet string, poolSize, max
 	}
 
 	if subnet == "" {
-		details, err := ListInterfaceDetails()
+		detected, err := detectRotationPrefixWithRunner(runner, interfaceName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to auto-detect IPv6 subnet: %v; set network.ipv6_subnet", err)
 		}
-		subnet = detectSubnetFromDetails(interfaceName, details)
-		if subnet == "" {
-			return nil, fmt.Errorf("IPv6 subnet is empty and no /64 address was found on %s; set network.ipv6_subnet", interfaceName)
-		}
+		subnet = detected
 		log.Printf("auto-detected IPv6 subnet: %s", subnet)
 	}
 

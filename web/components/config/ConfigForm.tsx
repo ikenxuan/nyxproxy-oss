@@ -244,9 +244,11 @@ function ToggleRow({
         {description && <p className="mt-0.5 text-xs leading-relaxed text-muted">{description}</p>}
       </div>
       <Switch isSelected={checked} onChange={onChange} isDisabled={disabled} aria-label={label}>
-        <Switch.Control>
-          <Switch.Thumb />
-        </Switch.Control>
+        <Switch.Content>
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+        </Switch.Content>
       </Switch>
     </div>
   );

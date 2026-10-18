@@ -88,12 +88,18 @@ type fakePool struct {
 	mu      sync.Mutex
 	size    int
 	rotated int64
+	prefix  string
 }
 
 func (p *fakePool) GetRandomIPv6() (net.IP, error) { return nil, errors.New("unused") }
 func (p *fakePool) IsPoolAddress(net.IP) bool      { return false }
 func (p *fakePool) Stop()                          {}
-func (p *fakePool) Prefix() string                 { return "2001:db8::/64" }
+func (p *fakePool) Prefix() string {
+	if p.prefix != "" {
+		return p.prefix
+	}
+	return "2001:db8::/64"
+}
 
 func (p *fakePool) GetPoolSize() int {
 	p.mu.Lock()
@@ -112,7 +118,7 @@ func (p *fakePool) Snapshot() network.PoolSnapshot {
 	defer p.mu.Unlock()
 	return network.PoolSnapshot{
 		Size:          p.size,
-		Prefix:        "2001:db8::/64",
+		Prefix:        p.Prefix(),
 		Rotations:     p.rotated,
 		MaxUsage:      10,
 		MaxAgeSeconds: 600,
@@ -685,5 +691,134 @@ func TestShutdownBeforeStartIsPrompt(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Shutdown blocked for a supervisor that never started")
+	}
+}
+
+func TestCheckPrefixRebuildsProxyInAutoMode(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network.RotateIPv6 = true
+	cfg.Network.IPv6Subnet = ""
+	store, _ := newTestStore(t, cfg)
+
+	factory := &scriptedFactory{}
+	factory.onCreate = func(p *fakeProxy) {
+		p.pool = &fakePool{prefix: p.cfg.Network.IPv6Subnet}
+	}
+	sup := New(cfg, store, factory.create, metrics.New("test"), "test")
+	sup.prefixInterval = time.Hour // keep the background ticker out of the way
+	sup.prefixDebounce = time.Second
+	sup.detectPrefix = func(string) ([]string, error) { return []string{"2001:db8:2::/64"}, nil }
+	if err := sup.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { sup.Shutdown(context.Background()) })
+
+	// The initial proxy represents the pool built from the old prefix.
+	factory.created[0].pool = &fakePool{prefix: "2001:db8:1::/64"}
+
+	sup.checkPrefix() // records the pending prefix
+	sup.mu.Lock()
+	sup.pendingSince = time.Now().Add(-time.Minute)
+	sup.mu.Unlock()
+	sup.checkPrefix() // debounce elapsed: rebuilds
+
+	if factory.calls != 2 {
+		t.Fatalf("factory calls = %d, want 2", factory.calls)
+	}
+	if !factory.created[0].stopped {
+		t.Fatal("old proxy was not stopped")
+	}
+	if got := factory.created[1].cfg.Network.IPv6Subnet; got != "2001:db8:2::/64" {
+		t.Fatalf("new proxy prefix = %q, want 2001:db8:2::/64", got)
+	}
+	got, _ := store.Snapshot()
+	if got.Network.IPv6Subnet != "" {
+		t.Fatalf("stored prefix = %q, want auto mode to stay empty", got.Network.IPv6Subnet)
+	}
+	if sup.cfg.Network.IPv6Subnet != "" {
+		t.Fatalf("runtime config prefix = %q, want auto mode to stay empty", sup.cfg.Network.IPv6Subnet)
+	}
+}
+
+func TestCheckPrefixIgnoresFixedSubnet(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network.RotateIPv6 = true
+	cfg.Network.IPv6Subnet = "2001:db8:1::/64"
+	store, _ := newTestStore(t, cfg)
+
+	factory := &scriptedFactory{}
+	factory.onCreate = func(p *fakeProxy) {
+		p.pool = &fakePool{prefix: p.cfg.Network.IPv6Subnet}
+	}
+	sup := New(cfg, store, factory.create, metrics.New("test"), "test")
+	sup.prefixInterval = time.Hour
+	calls := 0
+	sup.detectPrefix = func(string) ([]string, error) {
+		calls++
+		return []string{"2001:db8:2::/64"}, nil
+	}
+	if err := sup.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { sup.Shutdown(context.Background()) })
+
+	sup.checkPrefix()
+	sup.checkPrefix()
+
+	if calls != 0 {
+		t.Fatalf("detector calls = %d, want 0 for a fixed prefix", calls)
+	}
+	if factory.calls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factory.calls)
+	}
+}
+
+func TestCheckPrefixSwitchesToNewlyAppearedPrefix(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network.RotateIPv6 = true
+	cfg.Network.IPv6Subnet = ""
+	store, _ := newTestStore(t, cfg)
+
+	factory := &scriptedFactory{}
+	factory.onCreate = func(p *fakeProxy) {
+		p.pool = &fakePool{prefix: p.cfg.Network.IPv6Subnet}
+	}
+	oldPrefix := "2001:db8:1::/64"
+	newPrefix := "2001:db8:2::/64"
+	prefixes := []string{oldPrefix}
+	sup := New(cfg, store, factory.create, metrics.New("test"), "test")
+	sup.prefixInterval = time.Hour
+	sup.prefixDebounce = time.Second
+	sup.detectPrefix = func(string) ([]string, error) { return prefixes, nil }
+	if err := sup.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { sup.Shutdown(context.Background()) })
+	factory.created[0].pool = &fakePool{prefix: oldPrefix}
+
+	sup.checkPrefix() // learn the old prefix
+	// Backdate the old prefix so the new one is clearly newer.
+	sup.mu.Lock()
+	sup.prefixSeen[oldPrefix] = time.Now().Add(-time.Minute)
+	sup.mu.Unlock()
+
+	prefixes = []string{newPrefix, oldPrefix} // both are present during the transition
+	sup.checkPrefix()                         // records the pending target
+	sup.mu.Lock()
+	sup.pendingSince = time.Now().Add(-time.Minute)
+	sup.mu.Unlock()
+	sup.checkPrefix() // rebuilds
+
+	if factory.calls != 2 {
+		t.Fatalf("factory calls = %d, want 2", factory.calls)
+	}
+	if got := factory.created[1].cfg.Network.IPv6Subnet; got != newPrefix {
+		t.Fatalf("new proxy prefix = %q, want %q", got, newPrefix)
+	}
+
+	// The old prefix is still present; the supervisor must keep the new one.
+	sup.checkPrefix()
+	if factory.calls != 2 {
+		t.Fatalf("factory calls = %d after settling, want 2", factory.calls)
 	}
 }

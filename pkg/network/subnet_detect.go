@@ -2,7 +2,10 @@ package network
 
 import (
 	"fmt"
+	"math"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -172,6 +175,186 @@ func NormalizeSubnet(subnet string) (string, error) {
 	// Already /64, just ensure proper formatting
 	ip := ipNet.IP.Mask(net.CIDRMask(64, 128))
 	return fmt.Sprintf("%s/64", ip.String()), nil
+}
+
+// DetectRotationPrefixes returns every usable global /64 on the interface,
+// most preferred first. Deprecated, temporary, and tentative addresses are
+// ignored; addresses with a longer remaining preferred lifetime sort first so
+// a freshly delegated prefix is preferred over one that is expiring.
+//
+// Pool addresses are added as /128 and are therefore never returned.
+func DetectRotationPrefixes(interfaceName string) ([]string, error) {
+	return detectRotationPrefixesWithRunner(execRunner{}, interfaceName)
+}
+
+// DetectRotationPrefix returns the best usable global /64 on the interface.
+func DetectRotationPrefix(interfaceName string) (string, error) {
+	prefixes, err := DetectRotationPrefixes(interfaceName)
+	if err != nil {
+		return "", err
+	}
+	return prefixes[0], nil
+}
+
+func detectRotationPrefixesWithRunner(runner CommandRunner, interfaceName string) ([]string, error) {
+	if interfaceName == "" {
+		iface, err := getDefaultInterface()
+		if err != nil {
+			return nil, err
+		}
+		interfaceName = iface.Name
+	}
+
+	output, err := runner.Run("ip", "-6", "addr", "show", "dev", interfaceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect interface %s: %v: %s",
+			interfaceName, err, strings.TrimSpace(string(output)))
+	}
+
+	prefixes := parseRotationPrefixes(string(output))
+	if len(prefixes) == 0 {
+		return nil, fmt.Errorf("no usable global IPv6 /64 found on interface %s", interfaceName)
+	}
+	return prefixes, nil
+}
+
+func detectRotationPrefixWithRunner(runner CommandRunner, interfaceName string) (string, error) {
+	prefixes, err := detectRotationPrefixesWithRunner(runner, interfaceName)
+	if err != nil {
+		return "", err
+	}
+	return prefixes[0], nil
+}
+
+// parseRotationPrefix extracts the best usable global /64 from `ip -6 addr
+// show` output.
+func parseRotationPrefix(output string) string {
+	prefixes := parseRotationPrefixes(output)
+	if len(prefixes) == 0 {
+		return ""
+	}
+	return prefixes[0]
+}
+
+type prefixCandidate struct {
+	prefix      string
+	preferred   uint64
+	hasLifetime bool
+	order       int
+}
+
+// parseRotationPrefixes extracts usable global /64 prefixes from `ip -6 addr
+// show` output, ordered by remaining preferred lifetime.
+func parseRotationPrefixes(output string) []string {
+	var candidates []*prefixCandidate
+	var current *prefixCandidate
+
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		if fields[0] == "inet6" {
+			current = nil
+			if len(fields) < 4 || !scopeIsGlobal(fields) {
+				continue
+			}
+			if hasAddrFlag(fields, "deprecated") || hasAddrFlag(fields, "temporary") ||
+				hasAddrFlag(fields, "tentative") || hasAddrFlag(fields, "dadfailed") {
+				continue
+			}
+
+			_, ipNet, err := net.ParseCIDR(fields[1])
+			if err != nil || ipNet.IP.To4() != nil {
+				continue
+			}
+			ones, bits := ipNet.Mask.Size()
+			if ones != 64 || bits != 128 {
+				continue
+			}
+			current = &prefixCandidate{
+				prefix: ipNet.IP.Mask(ipNet.Mask).String() + "/64",
+				order:  len(candidates),
+			}
+			candidates = append(candidates, current)
+			continue
+		}
+
+		if current != nil {
+			for i := 0; i+1 < len(fields); i++ {
+				if fields[i] == "preferred_lft" {
+					current.preferred = parseLifetime(fields[i+1])
+					current.hasLifetime = true
+					current = nil
+					break
+				}
+			}
+		}
+	}
+
+	// Deduplicate prefixes and drop addresses whose preferred lifetime has
+	// already expired.
+	byPrefix := make(map[string]*prefixCandidate, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.hasLifetime && candidate.preferred == 0 {
+			continue
+		}
+		if existing, ok := byPrefix[candidate.prefix]; ok {
+			if candidate.preferred > existing.preferred {
+				existing.preferred = candidate.preferred
+			}
+			continue
+		}
+		byPrefix[candidate.prefix] = candidate
+	}
+
+	unique := make([]*prefixCandidate, 0, len(byPrefix))
+	for _, candidate := range byPrefix {
+		unique = append(unique, candidate)
+	}
+	sort.Slice(unique, func(i, j int) bool {
+		if unique[i].preferred != unique[j].preferred {
+			return unique[i].preferred > unique[j].preferred
+		}
+		return unique[i].order < unique[j].order
+	})
+
+	prefixes := make([]string, 0, len(unique))
+	for _, candidate := range unique {
+		prefixes = append(prefixes, candidate.prefix)
+	}
+	return prefixes
+}
+
+func parseLifetime(value string) uint64 {
+	value = strings.TrimSuffix(value, "sec")
+	if value == "forever" {
+		return math.MaxUint64
+	}
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return seconds
+}
+
+func scopeIsGlobal(fields []string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "scope" {
+			return fields[i+1] == "global"
+		}
+	}
+	return false
+}
+
+func hasAddrFlag(fields []string, flag string) bool {
+	for _, field := range fields {
+		if field == flag {
+			return true
+		}
+	}
+	return false
 }
 
 // IsValidIPv6Subnet checks if a string is a valid IPv6 /64 subnet

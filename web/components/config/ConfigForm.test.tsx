@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '@/lib/i18n';
 import type { Config } from '@/lib/types';
@@ -58,5 +58,26 @@ describe('ConfigForm', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Managed by environment')).toBeInTheDocument();
     expect(screen.getByText('Restart required')).toBeInTheDocument();
+  });
+
+  it('toggles a switch when its control is clicked', () => {
+    const onChange = vi.fn<(next: Config) => void>();
+    render(
+      <I18nProvider>
+        <ConfigForm
+          value={value}
+          locked={{}}
+          errors={{}}
+          interfaces={[]}
+          passwordsSet={{}}
+          onChange={onChange}
+        />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable IPv4' }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0][0].network.ipv4_enabled).toBe(true);
   });
 });

@@ -299,3 +299,70 @@ func TestShutdownStopsOpenLogStream(t *testing.T) {
 		t.Fatal("log stream did not close after Shutdown")
 	}
 }
+
+func TestBuildProxyURL(t *testing.T) {
+	cases := []struct {
+		name   string
+		status app.ProxyStatus
+		user   string
+		pass   string
+		host   string
+		want   string
+	}{
+		{
+			name:   "wildcard ipv6 socks5",
+			status: app.ProxyStatus{Type: "socks5", Listen: "[::]:18080"},
+			user:   "admin",
+			pass:   "p@ss word",
+			host:   "203.0.113.7",
+			want:   "socks5://admin:p%40ss%20word@203.0.113.7:18080",
+		},
+		{
+			name:   "wildcard ipv4 http",
+			status: app.ProxyStatus{Type: "https", Listen: "0.0.0.0:8080"},
+			user:   "u",
+			pass:   "p",
+			host:   "example.com",
+			want:   "http://u:p@example.com:8080",
+		},
+		{
+			name:   "specific host is kept",
+			status: app.ProxyStatus{Type: "socks5", Listen: "127.0.0.1:1080"},
+			user:   "u",
+			pass:   "p",
+			host:   "example.com",
+			want:   "socks5://u:p@127.0.0.1:1080",
+		},
+		{
+			name:   "no listener",
+			status: app.ProxyStatus{Type: "socks5"},
+			user:   "u",
+			pass:   "p",
+			host:   "example.com",
+			want:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildProxyURL(tc.status, tc.user, tc.pass, tc.host); got != tc.want {
+				t.Fatalf("buildProxyURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRequestHost(t *testing.T) {
+	cases := map[string]string{
+		"example.com:18081":   "example.com",
+		"example.com":         "example.com",
+		"[2001:db8::1]:18081": "2001:db8::1",
+		"[2001:db8::1]":       "2001:db8::1",
+	}
+	for host, want := range cases {
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+		req.Host = host
+		if got := requestHost(req); got != want {
+			t.Fatalf("requestHost(%q) = %q, want %q", host, got, want)
+		}
+	}
+}

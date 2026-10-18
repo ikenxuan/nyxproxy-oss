@@ -8,14 +8,15 @@ import (
 )
 
 type fakeRunner struct {
-	calls [][]string
-	err   error
+	calls  [][]string
+	output []byte
+	err    error
 }
 
 func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 	call := append([]string{name}, args...)
 	f.calls = append(f.calls, call)
-	return nil, f.err
+	return f.output, f.err
 }
 
 func newTestManager(runner CommandRunner, poolSize int) *IPv6Manager {

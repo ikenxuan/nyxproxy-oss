@@ -92,9 +92,10 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 
 	protocol := cfg.GetProxyProtocol()
 
-	// Initialize IPv6 Manager if rotating IPv6 is enabled
+	// Initialize IPv6 Manager if rotating IPv6 is enabled. An empty subnet
+	// means auto-detect the current /64 and follow ISP prefix changes.
 	var pool network.Pool
-	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
+	if cfg.Network.RotateIPv6 {
 		mgr, err := network.NewIPv6Manager(
 			cfg.Network.InterfaceName,
 			cfg.Network.IPv6Subnet,
@@ -106,7 +107,7 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
 		}
 		pool = mgr
-		log.Printf("IPv6 rotation enabled for subnet: %s", cfg.Network.IPv6Subnet)
+		log.Printf("IPv6 rotation enabled for subnet: %s", mgr.Prefix())
 	}
 
 	// Get local address for outbound connections
